@@ -105,6 +105,10 @@ def model_input_dict(frame: pd.DataFrame) -> dict[str, np.ndarray]:
 
 def score_candidates(con: duckdb.DuckDBPyConnection, settings: Settings, *, limit: int = 500) -> list[Candidate]:
     frame = candidate_frame(con, settings, limit=limit)
+    return rank_candidate_frame(frame, settings)
+
+
+def rank_candidate_frame(frame: pd.DataFrame, settings: Settings) -> list[Candidate]:
     if frame.empty:
         return []
 

@@ -4,27 +4,70 @@ from __future__ import annotations
 
 import json
 import signal
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from rich.console import Console
 
 from rubik_spotify_queue.config import Settings
 from rubik_spotify_queue.db import connect, migrate
 from rubik_spotify_queue.eventizer import Eventizer, next_capture_poll_seconds, next_poll_seconds
-from rubik_spotify_queue.recommender import Candidate, score_candidates
+from rubik_spotify_queue.recommender import Candidate, candidate_frame, rank_candidate_frame
 from rubik_spotify_queue.spotify import RateLimited, SpotifyClient
 from rubik_spotify_queue.time_features import local_time_parts, within_hour_window
 
 
 console = Console()
 
+LOCK_RETRY_MESSAGES = (
+    "could not set lock",
+    "conflicting lock",
+    "being used by another process",
+)
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return any(message in detail for message in LOCK_RETRY_MESSAGES)
+
+
+def runtime_connect(database_path: Path, *, read_only: bool = False):
+    last_exc: Exception | None = None
+    for _ in range(20):
+        try:
+            return connect(database_path, read_only=read_only)
+        except Exception as exc:
+            if not _is_lock_error(exc):
+                raise
+            last_exc = exc
+            time.sleep(0.25)
+    assert last_exc is not None
+    raise last_exc
+
+
+def runtime_migrate(database_path: Path) -> None:
+    last_exc: Exception | None = None
+    for _ in range(20):
+        try:
+            migrate(database_path)
+            return
+        except Exception as exc:
+            if not _is_lock_error(exc):
+                raise
+            last_exc = exc
+            time.sleep(0.25)
+    assert last_exc is not None
+    raise last_exc
+
 
 @dataclass
 class ServiceState:
     stop_requested: bool = False
+    stop_event: threading.Event = field(default_factory=threading.Event)
     last_queue_at: float = 0.0
     poll_count: int = 0
     currently_queued_track_ids: set[str] | None = None
@@ -43,7 +86,7 @@ class QueueService:
         self.enable_queueing = enable_queueing
 
     def run_forever(self) -> None:
-        migrate(self.settings.database_path)
+        runtime_migrate(self.settings.database_path)
         client = SpotifyClient(self.settings)
         self._install_signal_handlers()
         console.print(
@@ -55,10 +98,15 @@ class QueueService:
         try:
             while not self.state.stop_requested:
                 sleep_seconds = self.tick(client)
-                time.sleep(sleep_seconds)
+                if self.state.stop_event.wait(max(0.0, sleep_seconds)):
+                    break
         finally:
-            with connect(self.settings.database_path) as con:
-                self.eventizer.finalize(con)
+            if self.enable_polling:
+                con = runtime_connect(self.settings.database_path)
+                try:
+                    self.eventizer.finalize(con)
+                finally:
+                    con.close()
             client.close()
             console.print("[yellow]Service stopped; open event buffer finalized.[/yellow]")
 
@@ -83,11 +131,15 @@ class QueueService:
                 console.print(f"[red]Playback poll failed:[/red] {exc}")
                 return self.settings.idle_poll_seconds
 
-        with connect(self.settings.database_path) as con:
-            if self.enable_polling and snapshot is not None:
+        if self.enable_polling and snapshot is not None:
+            con = runtime_connect(self.settings.database_path)
+            try:
                 self.eventizer.observe(con, snapshot)
-            if self.enable_queueing and queue_window_open:
-                self._maybe_queue(con, client)
+            finally:
+                con.close()
+
+        if self.enable_queueing and queue_window_open:
+            self._maybe_queue(client)
 
         if self.enable_polling and not self.enable_queueing:
             sleep_seconds = next_capture_poll_seconds(self.settings, snapshot)
@@ -112,12 +164,18 @@ class QueueService:
     def combined(cls, settings: Settings) -> "QueueService":
         return cls(settings, enable_polling=True, enable_queueing=True)
 
-    def _maybe_queue(self, con, client: SpotifyClient) -> None:
+    def _maybe_queue(self, client: SpotifyClient) -> None:
         elapsed = time.time() - self.state.last_queue_at
         if elapsed < self.settings.min_queue_interval_seconds:
             return
 
-        candidates = score_candidates(con, self.settings, limit=500)
+        con = runtime_connect(self.settings.database_path, read_only=True)
+        try:
+            frame = candidate_frame(con, self.settings, limit=500)
+        finally:
+            con.close()
+
+        candidates = rank_candidate_frame(frame, self.settings)
         if not candidates:
             return
 
@@ -150,7 +208,7 @@ class QueueService:
             detail = str(exc)[:500]
             console.print(f"[red]Queue failed:[/red] {detail}")
 
-        self._record_queue_action(con, chosen, status=status, detail=detail)
+        self._record_queue_action(chosen, status=status, detail=detail)
 
     def _log_poll_result(self, snapshot, sleep_seconds: float) -> None:
         if snapshot is None:
@@ -171,39 +229,45 @@ class QueueService:
             f"[bold]{track}[/bold]{artist}{progress}; sleeping {sleep_seconds:.0f}s"
         )
 
-    def _record_queue_action(self, con, candidate: Candidate, *, status: str, detail: str) -> None:
-        con.execute(
-            """
-            INSERT INTO queue_actions (
-                queue_action_id, created_at, track_id, spotify_uri, predicted_score,
-                model_version, status, detail
-            ) VALUES (?,?,?,?,?,?,?,?);
-            """,
-            [
-                str(uuid.uuid4()),
-                datetime.now(timezone.utc),
-                candidate.track_id,
-                candidate.spotify_uri,
-                candidate.predicted_score,
-                candidate.model_version,
-                status,
-                detail,
-            ],
-        )
+    def _record_queue_action(self, candidate: Candidate, *, status: str, detail: str) -> None:
+        con = runtime_connect(self.settings.database_path)
+        try:
+            con.execute(
+                """
+                INSERT INTO queue_actions (
+                    queue_action_id, created_at, track_id, spotify_uri, predicted_score,
+                    model_version, status, detail
+                ) VALUES (?,?,?,?,?,?,?,?);
+                """,
+                [
+                    str(uuid.uuid4()),
+                    datetime.now(timezone.utc),
+                    candidate.track_id,
+                    candidate.spotify_uri,
+                    candidate.predicted_score,
+                    candidate.model_version,
+                    status,
+                    detail,
+                ],
+            )
+        finally:
+            con.close()
 
     def _install_signal_handlers(self) -> None:
         def request_stop(signum, frame) -> None:  # noqa: ANN001
             _ = signum
             _ = frame
             self.state.stop_requested = True
+            self.state.stop_event.set()
 
         signal.signal(signal.SIGINT, request_stop)
         signal.signal(signal.SIGTERM, request_stop)
 
 
 def health_json(settings: Settings) -> str:
-    migrate(settings.database_path)
-    with connect(settings.database_path, read_only=True) as con:
+    runtime_migrate(settings.database_path)
+    con = runtime_connect(settings.database_path, read_only=True)
+    try:
         row = con.execute(
             """
             SELECT
@@ -213,6 +277,8 @@ def health_json(settings: Settings) -> str:
                 (SELECT COUNT(*) FROM queue_actions);
             """
         ).fetchone()
+    finally:
+        con.close()
     return json.dumps(
         {
             "database": str(settings.database_path),
