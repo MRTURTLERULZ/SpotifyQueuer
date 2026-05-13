@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from rubik_spotify_queue.config import Settings
 from rubik_spotify_queue.eventizer import next_capture_poll_seconds, next_poll_seconds
+from rubik_spotify_queue.service import QueueService
 from rubik_spotify_queue.spotify import PlaybackSnapshot
 from rubik_spotify_queue.time_features import within_hour_window
 
@@ -60,6 +61,17 @@ def test_near_track_end_uses_fast_sleep() -> None:
 
 def test_normal_playback_uses_active_sleep() -> None:
     assert next_poll_seconds(_settings(), _snap(), queue_window_open=True) == 8
+
+
+def test_poll_result_log_is_readable(capsys) -> None:
+    svc = QueueService.poller(_settings())
+    svc.state.poll_count = 7
+    svc._log_poll_result(_snap(track_name="Song", artist_name="Artist", progress_ms=12_000), 8)
+    out = capsys.readouterr().out
+    assert "poll #7" in out
+    assert "Song" in out
+    assert "Artist" in out
+    assert "sleeping 8s" in out
 
 
 def test_hour_window_supports_overnight_ranges() -> None:

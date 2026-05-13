@@ -26,6 +26,7 @@ console = Console()
 class ServiceState:
     stop_requested: bool = False
     last_queue_at: float = 0.0
+    poll_count: int = 0
     currently_queued_track_ids: set[str] | None = None
 
     def __post_init__(self) -> None:
@@ -68,6 +69,11 @@ class QueueService:
 
         snapshot = None
         if self.enable_polling:
+            self.state.poll_count += 1
+            console.print(
+                f"[dim]{now.astimezone().strftime('%Y-%m-%d %H:%M:%S')}[/dim] "
+                f"[cyan]poll #{self.state.poll_count}[/cyan] checking Spotify playback..."
+            )
             try:
                 snapshot = client.current_playback()
             except RateLimited as exc:
@@ -84,10 +90,15 @@ class QueueService:
                 self._maybe_queue(con, client)
 
         if self.enable_polling and not self.enable_queueing:
-            return next_capture_poll_seconds(self.settings, snapshot)
+            sleep_seconds = next_capture_poll_seconds(self.settings, snapshot)
+            self._log_poll_result(snapshot, sleep_seconds)
+            return sleep_seconds
         if self.enable_queueing and not self.enable_polling:
             return self.settings.min_queue_interval_seconds if queue_window_open else self.settings.quiet_hours_poll_seconds
-        return next_poll_seconds(self.settings, snapshot, queue_window_open=queue_window_open)
+        sleep_seconds = next_poll_seconds(self.settings, snapshot, queue_window_open=queue_window_open)
+        if self.enable_polling:
+            self._log_poll_result(snapshot, sleep_seconds)
+        return sleep_seconds
 
     @classmethod
     def poller(cls, settings: Settings) -> "QueueService":
@@ -140,6 +151,25 @@ class QueueService:
             console.print(f"[red]Queue failed:[/red] {detail}")
 
         self._record_queue_action(con, chosen, status=status, detail=detail)
+
+    def _log_poll_result(self, snapshot, sleep_seconds: float) -> None:
+        if snapshot is None:
+            console.print(
+                f"[dim]poll #{self.state.poll_count}[/dim] no active playback; "
+                f"sleeping {sleep_seconds:.0f}s"
+            )
+            return
+
+        progress = ""
+        if snapshot.progress_ms is not None and snapshot.duration_ms:
+            progress = f" {snapshot.progress_ms // 1000}s/{snapshot.duration_ms // 1000}s"
+        state = "playing" if snapshot.is_playing else "paused"
+        track = snapshot.track_name or snapshot.track_id or "unknown track"
+        artist = f" - {snapshot.artist_name}" if snapshot.artist_name else ""
+        console.print(
+            f"[dim]poll #{self.state.poll_count}[/dim] {state}: "
+            f"[bold]{track}[/bold]{artist}{progress}; sleeping {sleep_seconds:.0f}s"
+        )
 
     def _record_queue_action(self, con, candidate: Candidate, *, status: str, detail: str) -> None:
         con.execute(
