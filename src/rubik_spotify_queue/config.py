@@ -34,10 +34,9 @@ class Settings(BaseSettings):
     database_path: Path = Field(default=Path("data/rubik_spotify_queue.duckdb"), validation_alias="DATABASE_PATH")
     token_path: Path = Field(default=Path("data/spotify_tokens.json"), validation_alias="TOKEN_PATH")
     model_path: Path = Field(default=Path("models/spotify_skip_model.keras"), validation_alias="MODEL_PATH")
-    model_ready_dir: Path = Field(
-        default=Path("../music-ai-recommender/data/model_ready"),
-        validation_alias="MODEL_READY_DIR",
-    )
+    raw_history_dir: Path = Field(default=Path("data/raw"), validation_alias="RAW_HISTORY_DIR")
+    model_ready_dir: Path = Field(default=Path("data/model_ready"), validation_alias="MODEL_READY_DIR")
+    processed_dir: Path = Field(default=Path("data/processed"), validation_alias="PROCESSED_DIR")
 
     timezone: str = Field(default="America/New_York", validation_alias="TIMEZONE")
     location_bucket: str = Field(default="unknown", validation_alias="LOCATION_BUCKET")
@@ -53,6 +52,8 @@ class Settings(BaseSettings):
     queue_end_hour: int = Field(default=24, validation_alias="QUEUE_END_HOUR")
     min_queue_interval_seconds: float = Field(default=180.0, validation_alias="MIN_QUEUE_INTERVAL_SECONDS")
     queue_batch_size: int = Field(default=2, validation_alias="QUEUE_BATCH_SIZE")
+    queue_random_pool_size: int = Field(default=50, validation_alias="QUEUE_RANDOM_POOL_SIZE")
+    queue_score_weight_power: float = Field(default=4.0, validation_alias="QUEUE_SCORE_WEIGHT_POWER")
     min_candidate_target_score: float = Field(default=0.55, validation_alias="MIN_CANDIDATE_TARGET_SCORE")
 
     spotify_accounts_authorize_url: str = "https://accounts.spotify.com/authorize"
@@ -65,7 +66,14 @@ class Settings(BaseSettings):
 
     def resolve_paths(self, root: Path | None = None) -> "Settings":
         base = root or Path.cwd()
-        for attr in ("database_path", "token_path", "model_path", "model_ready_dir"):
+        for attr in (
+            "database_path",
+            "token_path",
+            "model_path",
+            "raw_history_dir",
+            "model_ready_dir",
+            "processed_dir",
+        ):
             value = getattr(self, attr)
             if not value.is_absolute():
                 object.__setattr__(self, attr, (base / value).resolve())

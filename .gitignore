@@ -6,6 +6,12 @@ __pycache__/
 data/*.duckdb
 data/*.wal
 data/spotify_tokens.json
+data/raw/*
+data/model_ready/*
+data/processed/*
+!data/raw/.gitkeep
+!data/model_ready/.gitkeep
+!data/processed/.gitkeep
 models/*.keras
 models/*.h5
 models/*.tflite

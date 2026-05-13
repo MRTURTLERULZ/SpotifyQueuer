@@ -16,7 +16,7 @@ from rich.console import Console
 from rubik_spotify_queue.config import Settings
 from rubik_spotify_queue.db import connect, migrate
 from rubik_spotify_queue.eventizer import Eventizer, next_capture_poll_seconds, next_poll_seconds
-from rubik_spotify_queue.recommender import Candidate, candidate_frame, rank_candidate_frame
+from rubik_spotify_queue.recommender import Candidate, candidate_frame, rank_candidate_frame, select_weighted_queue_batch
 from rubik_spotify_queue.spotify import RateLimited, SpotifyClient
 from rubik_spotify_queue.time_features import local_time_parts, within_hour_window
 
@@ -180,12 +180,11 @@ class QueueService:
             return
 
         already = self.state.currently_queued_track_ids or set()
-        chosen_batch = [
-            candidate
-            for candidate in candidates
-            if candidate.predicted_score >= self.settings.min_candidate_target_score
-            and candidate.track_id not in already
-        ][: max(1, int(self.settings.queue_batch_size))]
+        chosen_batch = select_weighted_queue_batch(
+            candidates,
+            self.settings,
+            already_queued_track_ids=already,
+        )
         if not chosen_batch:
             return
 

@@ -4,7 +4,7 @@ Codex-written service for a Rubik Pi 3 that:
 
 1. Polls Spotify playback politely and records finalized listening events.
 2. Scores known songs with a TensorFlow model when available.
-3. Adds the highest-scoring song to your Spotify queue when it is likely not to be skipped.
+3. Samples from high-scoring songs and adds a small batch to your Spotify queue.
 
 The old `music-ai-recommender` project is kept as reference. This project is the cleaner service target.
 
@@ -37,9 +37,10 @@ Fill in `.env`, then:
 
 ```powershell
 rubik-spotify-queue init-db
+rubik-spotify-queue ingest-history
 rubik-spotify-queue seed-history
 rubik-spotify-queue login
-rubik-spotify-queue serve
+rubik-spotify-queue poll
 ```
 
 On a Rubik Pi/Linux shell:
@@ -51,7 +52,9 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 cp .env.example .env
 python -m rubik_spotify_queue.cli init-db
+python -m rubik_spotify_queue.cli ingest-history
 python -m rubik_spotify_queue.cli seed-history
+python -m rubik_spotify_queue.cli train-model
 python -m rubik_spotify_queue.cli poll
 ```
 
@@ -74,9 +77,9 @@ python -m rubik_spotify_queue.cli train-model
 By default, this reads:
 
 ```text
-../music-ai-recommender/data/model_ready/model_ready_history_train.csv
-../music-ai-recommender/data/model_ready/model_ready_history_val.csv
-../music-ai-recommender/data/model_ready/model_ready_history_test.csv
+data/model_ready/model_ready_history_train.csv
+data/model_ready/model_ready_history_val.csv
+data/model_ready/model_ready_history_test.csv
 ```
 
 and writes:
@@ -113,6 +116,31 @@ src/rubik_spotify_queue/model_training.py
 
 Runtime prediction code lives in `src/rubik_spotify_queue/recommender.py`.
 
+## History Ingestion
+
+Copy your Spotify Extended Streaming History JSON exports into:
+
+```text
+data/raw/
+```
+
+Then build model-ready data:
+
+```bash
+python -m rubik_spotify_queue.cli ingest-history
+```
+
+This writes:
+
+- `data/model_ready/model_ready_history_full.csv`
+- `data/model_ready/model_ready_history_train.csv`
+- `data/model_ready/model_ready_history_val.csv`
+- `data/model_ready/model_ready_history_test.csv`
+- `data/model_ready/feature_config.json`
+- `data/processed/history_events_processed_debug.csv`
+
+Time features are continuous. `hour_sin/hour_cos` use fractional hour, and `day_sin/day_cos` use weekday plus fractional day.
+
 ## History Seeding
 
 Seed the candidate song table from model-ready history:
@@ -121,7 +149,7 @@ Seed the candidate song table from model-ready history:
 python -m rubik_spotify_queue.cli seed-history
 ```
 
-This imports unique `track_id` / `artist_id` pairs from `model_ready_history_full.csv` into `songs`. Tracks with `spotify:track:...` IDs are queueable immediately once Spotify login is complete.
+This imports historical `track_id` / `artist_id` pairs from `model_ready_history_full.csv` into `songs`. The debug CSV provides the Spotify track URIs, so seeded songs are queueable immediately once Spotify login is complete.
 
 ## Runtime Modes
 
@@ -138,6 +166,7 @@ python -m rubik_spotify_queue.cli queue
 ```
 
 Scores songs and adds tracks to your queue during the configured queue window. It does not record playback snapshots.
+Each queue pass samples from the top `QUEUE_RANDOM_POOL_SIZE` eligible model scores using score-weighted randomness, then queues `QUEUE_BATCH_SIZE` tracks.
 
 ```bash
 python -m rubik_spotify_queue.cli serve
@@ -158,24 +187,48 @@ QUEUE_START_HOUR=7
 QUEUE_END_HOUR=24
 MIN_QUEUE_INTERVAL_SECONDS=180
 QUEUE_BATCH_SIZE=2
+QUEUE_RANDOM_POOL_SIZE=50
+QUEUE_SCORE_WEIGHT_POWER=4.0
 ```
 
 This avoids the old pattern of polling every second all day.
 
 ## systemd Example
 
-Create `/etc/systemd/system/rubik-spotify-queue.service`:
+Polling should run all the time. Queueing can be enabled only when you want the Pi to add songs.
+
+Create `/etc/systemd/system/rubik-spotify-poll.service`:
 
 ```ini
 [Unit]
-Description=Rubik Spotify Queue
+Description=Rubik Spotify Poller
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/pi/rubik-spotify-queue
-ExecStart=/home/pi/rubik-spotify-queue/.venv/bin/python -m rubik_spotify_queue.cli serve
+WorkingDirectory=/home/mahdi/SpotifyQueuer
+ExecStart=/home/mahdi/SpotifyQueuer/ai/bin/python -m rubik_spotify_queue.cli poll
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Optionally create `/etc/systemd/system/rubik-spotify-queue.service`:
+
+```ini
+[Unit]
+Description=Rubik Spotify Queuer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mahdi/SpotifyQueuer
+ExecStart=/home/mahdi/SpotifyQueuer/ai/bin/python -m rubik_spotify_queue.cli queue
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
@@ -188,8 +241,8 @@ Then:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now rubik-spotify-queue
-journalctl -u rubik-spotify-queue -f
+sudo systemctl enable --now rubik-spotify-poll
+journalctl -u rubik-spotify-poll -f
 ```
 
 ## Next Integration Step
@@ -198,6 +251,7 @@ Recommended first full run:
 
 ```bash
 python -m rubik_spotify_queue.cli init-db
+python -m rubik_spotify_queue.cli ingest-history
 python -m rubik_spotify_queue.cli seed-history
 python -m rubik_spotify_queue.cli train-model
 python -m rubik_spotify_queue.cli health

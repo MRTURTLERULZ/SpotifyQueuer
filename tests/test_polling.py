@@ -49,6 +49,16 @@ def test_capture_poll_ignores_queue_window_sleep() -> None:
     assert next_capture_poll_seconds(_settings(), _snap()) == 8
 
 
+def test_runtime_time_features_are_continuous() -> None:
+    from rubik_spotify_queue.time_features import local_time_parts
+
+    first = local_time_parts(datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc), "UTC")
+    second = local_time_parts(datetime(2026, 1, 5, 10, 45, tzinfo=timezone.utc), "UTC")
+    assert first["hour_float"] == 10.0
+    assert second["hour_float"] == 10.75
+    assert first["hour_sin"] != second["hour_sin"]
+
+
 def test_idle_uses_idle_sleep() -> None:
     assert next_poll_seconds(_settings(), None, queue_window_open=True) == 120
     assert next_poll_seconds(_settings(), _snap(is_playing=False), queue_window_open=True) == 120

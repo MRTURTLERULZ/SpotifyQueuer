@@ -142,6 +142,42 @@ def rank_candidate_frame(frame: pd.DataFrame, settings: Settings) -> list[Candid
     ]
 
 
+def select_weighted_queue_batch(
+    candidates: list[Candidate],
+    settings: Settings,
+    *,
+    already_queued_track_ids: set[str] | None = None,
+    rng: np.random.Generator | None = None,
+) -> list[Candidate]:
+    already = already_queued_track_ids or set()
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.predicted_score >= settings.min_candidate_target_score
+        and candidate.track_id not in already
+    ]
+    if not eligible:
+        return []
+
+    pool_size = max(1, int(settings.queue_random_pool_size))
+    batch_size = max(1, int(settings.queue_batch_size))
+    pool = sorted(eligible, key=lambda candidate: candidate.predicted_score, reverse=True)[:pool_size]
+    sample_size = min(batch_size, len(pool))
+
+    weights = np.asarray(
+        [max(0.0, candidate.predicted_score) ** float(settings.queue_score_weight_power) for candidate in pool],
+        dtype=float,
+    )
+    if not np.isfinite(weights).all() or float(weights.sum()) <= 0.0:
+        probabilities = None
+    else:
+        probabilities = weights / float(weights.sum())
+
+    generator = rng or np.random.default_rng()
+    selected_indices = generator.choice(len(pool), size=sample_size, replace=False, p=probabilities)
+    return [pool[int(index)] for index in selected_indices]
+
+
 def fallback_scores(frame: pd.DataFrame) -> np.ndarray:
     avg = pd.to_numeric(frame["avg_target_score"], errors="coerce").fillna(0.5)
     plays = pd.to_numeric(frame["plays"], errors="coerce").fillna(0)

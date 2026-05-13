@@ -131,6 +131,7 @@ def train_and_save(
         validation_data=(input_dict(val_df), val_df[TARGET_COLUMN].astype("float32").to_numpy()),
         epochs=epochs,
         batch_size=batch_size,
+        verbose=2,
     )
     test_loss, test_mae = model.evaluate(
         input_dict(test_df),
