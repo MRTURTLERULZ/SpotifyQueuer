@@ -71,6 +71,8 @@ DDL: tuple[str, ...] = (
         album_name TEXT,
         duration_ms INTEGER,
         spotify_uri TEXT,
+        history_play_count INTEGER,
+        history_avg_target_score DOUBLE,
         first_seen_at TIMESTAMP,
         last_seen_at TIMESTAMP
     );
@@ -92,6 +94,11 @@ DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_snapshots_observed_at ON snapshots(observed_at);",
 )
 
+SCHEMA_UPGRADES: tuple[str, ...] = (
+    "ALTER TABLE songs ADD COLUMN IF NOT EXISTS history_play_count INTEGER;",
+    "ALTER TABLE songs ADD COLUMN IF NOT EXISTS history_avg_target_score DOUBLE;",
+)
+
 
 def connect(database_path: Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     if not read_only:
@@ -104,7 +111,8 @@ def migrate(database_path: Path) -> None:
     try:
         for statement in DDL:
             con.execute(statement)
+        for statement in SCHEMA_UPGRADES:
+            con.execute(statement)
         con.commit()
     finally:
         con.close()
-

@@ -46,6 +46,13 @@ class PlaybackSnapshot:
     raw_json: str
 
 
+@dataclass(frozen=True)
+class SpotifyQueueState:
+    currently_playing_uri: str | None
+    upcoming_uris: tuple[str, ...]
+    raw_json: str
+
+
 class TokenStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -200,6 +207,13 @@ class SpotifyClient:
         response.raise_for_status()
         return normalize_playback(response.json(), observed_at=datetime.now(timezone.utc))
 
+    def current_queue(self) -> SpotifyQueueState:
+        response = self.request("GET", "/me/player/queue")
+        if response.status_code in (202, 204) or not response.content:
+            return SpotifyQueueState(currently_playing_uri=None, upcoming_uris=(), raw_json="")
+        response.raise_for_status()
+        return normalize_queue(response.json())
+
     def add_to_queue(self, spotify_uri: str) -> int:
         response = self.request("POST", "/me/player/queue", params={"uri": spotify_uri})
         if response.status_code not in (200, 204):
@@ -233,6 +247,29 @@ def normalize_playback(body: dict[str, Any], *, observed_at: datetime) -> Playba
         shuffle_state=body.get("shuffle_state") if isinstance(body.get("shuffle_state"), bool) else None,
         context_uri=str(context["uri"]) if context.get("uri") else None,
         spotify_uri=str(item["uri"]) if item.get("uri") else None,
+        raw_json=json.dumps(body, separators=(",", ":")),
+    )
+
+
+def normalize_queue(body: dict[str, Any]) -> SpotifyQueueState:
+    currently_playing = body.get("currently_playing")
+    current_uri = None
+    if isinstance(currently_playing, dict) and currently_playing.get("uri"):
+        current_uri = str(currently_playing["uri"])
+
+    upcoming: list[str] = []
+    raw_queue = body.get("queue")
+    if isinstance(raw_queue, list):
+        for item in raw_queue:
+            if not isinstance(item, dict):
+                continue
+            uri = item.get("uri")
+            if uri:
+                upcoming.append(str(uri))
+
+    return SpotifyQueueState(
+        currently_playing_uri=current_uri,
+        upcoming_uris=tuple(upcoming),
         raw_json=json.dumps(body, separators=(",", ":")),
     )
 

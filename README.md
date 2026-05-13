@@ -166,7 +166,14 @@ python -m rubik_spotify_queue.cli queue
 ```
 
 Scores songs and adds tracks to your queue during the configured queue window. It does not record playback snapshots.
-Each queue pass samples from the top `QUEUE_RANDOM_POOL_SIZE` eligible model scores using score-weighted randomness, then queues `QUEUE_BATCH_SIZE` tracks.
+The queuer checks Spotify's visible queue with `/me/player/queue`. It maintains an app-managed buffer: it only adds songs when fewer than `QUEUE_TARGET_BUFFER_SIZE` app-queued tracks are still visible ahead, and it only fills the open slots. Candidate songs are also filtered by `CANDIDATE_MIN_TOTAL_PLAYS`, so one-off tracks from the raw export do not enter the recommendation pool by default.
+
+When the queue is ready, selection works like this:
+
+- Score queueable candidates with TensorFlow, or with the history fallback if TensorFlow is unavailable.
+- Keep candidates above `MIN_CANDIDATE_TARGET_SCORE`.
+- Sort by score and take the top `QUEUE_RANDOM_POOL_SIZE`.
+- Randomly sample up to `QUEUE_BATCH_SIZE` songs without replacement using `predicted_score ** QUEUE_SCORE_WEIGHT_POWER`.
 
 ```bash
 python -m rubik_spotify_queue.cli serve
@@ -185,10 +192,13 @@ IDLE_POLL_SECONDS=120
 QUIET_HOURS_POLL_SECONDS=900
 QUEUE_START_HOUR=7
 QUEUE_END_HOUR=24
-MIN_QUEUE_INTERVAL_SECONDS=180
+QUEUE_READY_CHECK_SECONDS=20
+QUEUE_ADD_COOLDOWN_SECONDS=10
 QUEUE_BATCH_SIZE=2
+QUEUE_TARGET_BUFFER_SIZE=2
 QUEUE_RANDOM_POOL_SIZE=50
 QUEUE_SCORE_WEIGHT_POWER=4.0
+CANDIDATE_MIN_TOTAL_PLAYS=2
 ```
 
 This avoids the old pattern of polling every second all day.

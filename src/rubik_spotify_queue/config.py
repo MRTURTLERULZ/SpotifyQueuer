@@ -50,11 +50,14 @@ class Settings(BaseSettings):
 
     queue_start_hour: int = Field(default=7, validation_alias="QUEUE_START_HOUR")
     queue_end_hour: int = Field(default=24, validation_alias="QUEUE_END_HOUR")
-    min_queue_interval_seconds: float = Field(default=180.0, validation_alias="MIN_QUEUE_INTERVAL_SECONDS")
+    queue_ready_check_seconds: float = Field(default=20.0, validation_alias="QUEUE_READY_CHECK_SECONDS")
+    queue_add_cooldown_seconds: float = Field(default=10.0, validation_alias="QUEUE_ADD_COOLDOWN_SECONDS")
     queue_batch_size: int = Field(default=2, validation_alias="QUEUE_BATCH_SIZE")
+    queue_target_buffer_size: int = Field(default=2, validation_alias="QUEUE_TARGET_BUFFER_SIZE")
     queue_random_pool_size: int = Field(default=50, validation_alias="QUEUE_RANDOM_POOL_SIZE")
     queue_score_weight_power: float = Field(default=4.0, validation_alias="QUEUE_SCORE_WEIGHT_POWER")
     min_candidate_target_score: float = Field(default=0.55, validation_alias="MIN_CANDIDATE_TARGET_SCORE")
+    candidate_min_total_plays: int = Field(default=2, validation_alias="CANDIDATE_MIN_TOTAL_PLAYS")
 
     spotify_accounts_authorize_url: str = "https://accounts.spotify.com/authorize"
     spotify_token_url: str = "https://accounts.spotify.com/api/token"

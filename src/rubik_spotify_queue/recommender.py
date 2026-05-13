@@ -73,17 +73,31 @@ def candidate_frame(con: duckdb.DuckDBPyConnection, settings: Settings, *, limit
             s.artist_id,
             s.artist_name,
             s.last_seen_at,
-            AVG(e.target_score) AS avg_target_score,
-            COUNT(e.event_id) AS plays,
+            COALESCE(s.history_play_count, 0) AS history_play_count,
+            s.history_avg_target_score,
+            COUNT(e.event_id) AS live_plays,
+            COALESCE(s.history_play_count, 0) + COUNT(e.event_id) AS plays,
+            CASE
+                WHEN COALESCE(s.history_play_count, 0) + COUNT(e.event_id) = 0 THEN NULL
+                WHEN COUNT(e.event_id) = 0 THEN s.history_avg_target_score
+                WHEN s.history_avg_target_score IS NULL THEN AVG(e.target_score)
+                ELSE (
+                    (s.history_avg_target_score * COALESCE(s.history_play_count, 0))
+                    + (AVG(e.target_score) * COUNT(e.event_id))
+                ) / (COALESCE(s.history_play_count, 0) + COUNT(e.event_id))
+            END AS avg_target_score,
             MAX(e.ended_at) AS last_played_at
         FROM songs s
         LEFT JOIN listening_events e ON e.track_id = s.track_id
         WHERE s.spotify_uri IS NOT NULL
-        GROUP BY s.track_id, s.spotify_uri, s.track_name, s.artist_id, s.artist_name, s.last_seen_at
+        GROUP BY
+            s.track_id, s.spotify_uri, s.track_name, s.artist_id, s.artist_name,
+            s.last_seen_at, s.history_play_count, s.history_avg_target_score
+        HAVING COALESCE(s.history_play_count, 0) + COUNT(e.event_id) >= ?
         ORDER BY COALESCE(MAX(e.ended_at), s.last_seen_at) DESC
         LIMIT ?;
         """,
-        [limit],
+        [max(1, int(settings.candidate_min_total_plays)), limit],
     ).fetchdf()
     if rows.empty:
         return rows
@@ -147,22 +161,26 @@ def select_weighted_queue_batch(
     settings: Settings,
     *,
     already_queued_track_ids: set[str] | None = None,
+    already_queued_spotify_uris: set[str] | None = None,
+    batch_size: int | None = None,
     rng: np.random.Generator | None = None,
 ) -> list[Candidate]:
-    already = already_queued_track_ids or set()
+    already_tracks = already_queued_track_ids or set()
+    already_uris = already_queued_spotify_uris or set()
     eligible = [
         candidate
         for candidate in candidates
         if candidate.predicted_score >= settings.min_candidate_target_score
-        and candidate.track_id not in already
+        and candidate.track_id not in already_tracks
+        and candidate.spotify_uri not in already_uris
     ]
     if not eligible:
         return []
 
     pool_size = max(1, int(settings.queue_random_pool_size))
-    batch_size = max(1, int(settings.queue_batch_size))
+    requested_batch_size = max(1, int(batch_size if batch_size is not None else settings.queue_batch_size))
     pool = sorted(eligible, key=lambda candidate: candidate.predicted_score, reverse=True)[:pool_size]
-    sample_size = min(batch_size, len(pool))
+    sample_size = min(requested_batch_size, len(pool))
 
     weights = np.asarray(
         [max(0.0, candidate.predicted_score) ** float(settings.queue_score_weight_power) for candidate in pool],

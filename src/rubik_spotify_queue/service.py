@@ -71,10 +71,13 @@ class ServiceState:
     last_queue_at: float = 0.0
     poll_count: int = 0
     currently_queued_track_ids: set[str] | None = None
+    currently_queued_spotify_uris: set[str] | None = None
 
     def __post_init__(self) -> None:
         if self.currently_queued_track_ids is None:
             self.currently_queued_track_ids = set()
+        if self.currently_queued_spotify_uris is None:
+            self.currently_queued_spotify_uris = set()
 
 
 class QueueService:
@@ -139,14 +142,21 @@ class QueueService:
                 con.close()
 
         if self.enable_queueing and queue_window_open:
-            self._maybe_queue(client)
+            try:
+                self._maybe_queue(client)
+            except RateLimited as exc:
+                console.print(f"[yellow]Spotify queue check rate limited. Sleeping {exc.sleep_seconds:.0f}s.[/yellow]")
+                return exc.sleep_seconds
+            except Exception as exc:
+                console.print(f"[red]Queue check failed:[/red] {exc}")
+                return self.settings.queue_ready_check_seconds
 
         if self.enable_polling and not self.enable_queueing:
             sleep_seconds = next_capture_poll_seconds(self.settings, snapshot)
             self._log_poll_result(snapshot, sleep_seconds)
             return sleep_seconds
         if self.enable_queueing and not self.enable_polling:
-            return self.settings.min_queue_interval_seconds if queue_window_open else self.settings.quiet_hours_poll_seconds
+            return self.settings.queue_ready_check_seconds if queue_window_open else self.settings.quiet_hours_poll_seconds
         sleep_seconds = next_poll_seconds(self.settings, snapshot, queue_window_open=queue_window_open)
         if self.enable_polling:
             self._log_poll_result(snapshot, sleep_seconds)
@@ -166,8 +176,38 @@ class QueueService:
 
     def _maybe_queue(self, client: SpotifyClient) -> None:
         elapsed = time.time() - self.state.last_queue_at
-        if elapsed < self.settings.min_queue_interval_seconds:
+        if elapsed < self.settings.queue_add_cooldown_seconds:
             return
+
+        queue_state = client.current_queue()
+        queued_uris = set(queue_state.upcoming_uris)
+        occupied_uris = set(queued_uris)
+        if queue_state.currently_playing_uri:
+            occupied_uris.add(queue_state.currently_playing_uri)
+
+        con = runtime_connect(self.settings.database_path, read_only=True)
+        try:
+            recent_app_queued_uris = self._recent_queued_spotify_uris(con)
+            known_app_queued_uris = (self.state.currently_queued_spotify_uris or set()) | recent_app_queued_uris
+            app_buffered_uris = queued_uris & known_app_queued_uris
+            self.state.currently_queued_spotify_uris = occupied_uris & known_app_queued_uris
+        finally:
+            con.close()
+
+        target_buffer = max(1, int(self.settings.queue_target_buffer_size))
+        slots_available = target_buffer - len(app_buffered_uris)
+        if slots_available <= 0:
+            console.print(
+                f"[dim]app queue buffer full ({len(app_buffered_uris)}/{target_buffer}; "
+                f"Spotify shows {len(queued_uris)} total upcoming); "
+                f"checking again in {self.settings.queue_ready_check_seconds:.0f}s[/dim]"
+            )
+            return
+
+        console.print(
+            f"[cyan]queue ready[/cyan] app buffer has {len(app_buffered_uris)}/{target_buffer} "
+            f"tracks visible ahead; filling {slots_available} slot(s)."
+        )
 
         con = runtime_connect(self.settings.database_path, read_only=True)
         try:
@@ -184,8 +224,11 @@ class QueueService:
             candidates,
             self.settings,
             already_queued_track_ids=already,
+            already_queued_spotify_uris=occupied_uris,
+            batch_size=min(int(self.settings.queue_batch_size), slots_available),
         )
         if not chosen_batch:
+            console.print("[yellow]No eligible recommendation candidates available for open queue slots.[/yellow]")
             return
 
         queued_any = False
@@ -196,11 +239,14 @@ class QueueService:
                 code = client.add_to_queue(chosen.spotify_uri)
                 detail = f"spotify_status={code}"
                 already.add(chosen.track_id)
+                self.state.currently_queued_spotify_uris.add(chosen.spotify_uri)
                 queued_any = True
                 console.print(
                     f"[cyan]Queued[/cyan] {chosen.track_name or chosen.track_id} "
                     f"score={chosen.predicted_score:.3f} model={chosen.model_version}"
                 )
+            except RateLimited:
+                raise
             except Exception as exc:
                 status = "error"
                 detail = str(exc)[:500]
@@ -210,6 +256,20 @@ class QueueService:
 
         if queued_any:
             self.state.last_queue_at = time.time()
+
+    def _recent_queued_spotify_uris(self, con) -> set[str]:  # noqa: ANN001
+        limit = max(10, int(self.settings.queue_target_buffer_size) * 5)
+        rows = con.execute(
+            """
+            SELECT spotify_uri
+            FROM queue_actions
+            WHERE status = 'queued' AND spotify_uri IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT ?;
+            """,
+            [limit],
+        ).fetchall()
+        return {str(row[0]) for row in rows if row and row[0]}
 
     def _log_poll_result(self, snapshot, sleep_seconds: float) -> None:
         if snapshot is None:

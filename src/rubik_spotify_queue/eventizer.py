@@ -136,8 +136,9 @@ class Eventizer:
             """
             INSERT INTO songs (
                 track_id, track_name, artist_id, artist_name, album_id, album_name,
-                duration_ms, spotify_uri, first_seen_at, last_seen_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                duration_ms, spotify_uri, history_play_count, history_avg_target_score,
+                first_seen_at, last_seen_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT (track_id) DO UPDATE SET
                 track_name = COALESCE(EXCLUDED.track_name, songs.track_name),
                 artist_id = COALESCE(EXCLUDED.artist_id, songs.artist_id),
@@ -157,6 +158,8 @@ class Eventizer:
                 snapshot.album_name,
                 snapshot.duration_ms,
                 snapshot.spotify_uri,
+                None,
+                None,
                 datetime.now(timezone.utc),
                 datetime.now(timezone.utc),
             ],

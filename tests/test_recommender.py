@@ -80,7 +80,10 @@ def test_score_candidates_uses_fallback_when_model_missing(tmp_path) -> None:
                 now() - INTERVAL 10 HOUR, now() - INTERVAL 10 HOUR, 0.9, false, now());
             """
         )
-        settings = Settings(MODEL_PATH=str(tmp_path / "missing.keras")).resolve_paths(tmp_path)
+        settings = Settings(
+            MODEL_PATH=str(tmp_path / "missing.keras"),
+            CANDIDATE_MIN_TOTAL_PLAYS=1,
+        ).resolve_paths(tmp_path)
         candidates = score_candidates(con, settings)
     finally:
         con.close()
