@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/*.duckdb
+data/*.wal
+data/spotify_tokens.json
+models/*.keras
+models/*.h5
+models/*.tflite
+models/saved_model/

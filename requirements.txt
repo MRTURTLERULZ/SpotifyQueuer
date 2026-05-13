@@ -1,0 +1,4 @@
+-e .[dev]
+# On the Rubik Pi, install TensorFlow separately only if a compatible wheel exists:
+# python -m pip install -e ".[tensorflow]"
+
