@@ -23,7 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Create or migrate the DuckDB database")
     sub.add_parser("login", help="Run Spotify OAuth and save local tokens")
-    sub.add_parser("serve", help="Run the long-lived poll-and-queue service")
+    sub.add_parser("poll", help="Run the always-on playback polling service only")
+    sub.add_parser("queue", help="Run the queueing service only")
+    sub.add_parser("serve", help="Run combined polling and queueing in one process")
     sub.add_parser("health", help="Print service/database health JSON")
 
     p_seed = sub.add_parser("seed-history", help="Seed songs from model-ready history CSVs")
@@ -47,8 +49,12 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "login":
         run_login(settings)
         console.print(f"[green]Spotify tokens saved:[/green] {settings.token_path}")
+    elif args.command == "poll":
+        QueueService.poller(settings).run_forever()
+    elif args.command == "queue":
+        QueueService.queuer(settings).run_forever()
     elif args.command == "serve":
-        QueueService(settings).run_forever()
+        QueueService.combined(settings).run_forever()
     elif args.command == "health":
         console.print(health_json(settings))
     elif args.command == "seed-history":

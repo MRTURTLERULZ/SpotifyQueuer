@@ -173,6 +173,10 @@ def compute_target_score(completion_ratio: float | None, was_skipped: bool) -> f
 def next_poll_seconds(settings: Settings, snapshot: PlaybackSnapshot | None, *, queue_window_open: bool) -> float:
     if not queue_window_open:
         return settings.quiet_hours_poll_seconds
+    return next_capture_poll_seconds(settings, snapshot)
+
+
+def next_capture_poll_seconds(settings: Settings, snapshot: PlaybackSnapshot | None) -> float:
     if snapshot is None or not snapshot.is_playing:
         return settings.idle_poll_seconds
     if snapshot.duration_ms and snapshot.progress_ms is not None:
@@ -198,4 +202,3 @@ def summary(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
         "avg_target_score": float(row[1]) if row[1] is not None else None,
         "skip_rate": float(row[2]) if row[2] is not None else None,
     }
-

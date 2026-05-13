@@ -52,7 +52,7 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 python -m rubik_spotify_queue.cli init-db
 python -m rubik_spotify_queue.cli seed-history
-python -m rubik_spotify_queue.cli serve
+python -m rubik_spotify_queue.cli poll
 ```
 
 For TensorFlow training/prediction, use Python 3.11 or 3.12 and install the optional extra:
@@ -123,6 +123,28 @@ python -m rubik_spotify_queue.cli seed-history
 
 This imports unique `track_id` / `artist_id` pairs from `model_ready_history_full.csv` into `songs`. Tracks with `spotify:track:...` IDs are queueable immediately once Spotify login is complete.
 
+## Runtime Modes
+
+Polling and queueing can run separately:
+
+```bash
+python -m rubik_spotify_queue.cli poll
+```
+
+Records Spotify playback continuously using active/idle polling intervals. It ignores the queue window, so listening capture can run all day.
+
+```bash
+python -m rubik_spotify_queue.cli queue
+```
+
+Scores songs and adds tracks to your queue during the configured queue window. It does not record playback snapshots.
+
+```bash
+python -m rubik_spotify_queue.cli serve
+```
+
+Runs the old combined mode in one process: polling plus queueing.
+
 ## Reducing Rate Limits
 
 Recommended starting values:
@@ -179,5 +201,5 @@ python -m rubik_spotify_queue.cli seed-history
 python -m rubik_spotify_queue.cli train-model
 python -m rubik_spotify_queue.cli health
 python -m rubik_spotify_queue.cli login
-python -m rubik_spotify_queue.cli serve
+python -m rubik_spotify_queue.cli poll
 ```

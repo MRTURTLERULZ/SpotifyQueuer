@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from rubik_spotify_queue.config import Settings
-from rubik_spotify_queue.eventizer import next_poll_seconds
+from rubik_spotify_queue.eventizer import next_capture_poll_seconds, next_poll_seconds
 from rubik_spotify_queue.spotify import PlaybackSnapshot
 from rubik_spotify_queue.time_features import within_hour_window
 
@@ -44,6 +44,10 @@ def test_quiet_window_uses_long_sleep() -> None:
     assert next_poll_seconds(_settings(), _snap(), queue_window_open=False) == 900
 
 
+def test_capture_poll_ignores_queue_window_sleep() -> None:
+    assert next_capture_poll_seconds(_settings(), _snap()) == 8
+
+
 def test_idle_uses_idle_sleep() -> None:
     assert next_poll_seconds(_settings(), None, queue_window_open=True) == 120
     assert next_poll_seconds(_settings(), _snap(is_playing=False), queue_window_open=True) == 120
@@ -62,4 +66,3 @@ def test_hour_window_supports_overnight_ranges() -> None:
     assert within_hour_window(23, 22, 3)
     assert within_hour_window(2, 22, 3)
     assert not within_hour_window(12, 22, 3)
-

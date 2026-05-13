@@ -13,7 +13,7 @@ from rich.console import Console
 
 from rubik_spotify_queue.config import Settings
 from rubik_spotify_queue.db import connect, migrate
-from rubik_spotify_queue.eventizer import Eventizer, next_poll_seconds
+from rubik_spotify_queue.eventizer import Eventizer, next_capture_poll_seconds, next_poll_seconds
 from rubik_spotify_queue.recommender import Candidate, score_candidates
 from rubik_spotify_queue.spotify import RateLimited, SpotifyClient
 from rubik_spotify_queue.time_features import local_time_parts, within_hour_window
@@ -34,16 +34,22 @@ class ServiceState:
 
 
 class QueueService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, enable_polling: bool = True, enable_queueing: bool = True) -> None:
         self.settings = settings
         self.state = ServiceState()
         self.eventizer = Eventizer(settings)
+        self.enable_polling = enable_polling
+        self.enable_queueing = enable_queueing
 
     def run_forever(self) -> None:
         migrate(self.settings.database_path)
         client = SpotifyClient(self.settings)
         self._install_signal_handlers()
-        console.print(f"[green]Rubik Spotify queue service started[/green] db={self.settings.database_path}")
+        console.print(
+            f"[green]Rubik Spotify service started[/green] "
+            f"polling={self.enable_polling} queueing={self.enable_queueing} "
+            f"db={self.settings.database_path}"
+        )
 
         try:
             while not self.state.stop_requested:
@@ -60,22 +66,40 @@ class QueueService:
         hour = int(local_time_parts(now, self.settings.timezone)["hour"])
         queue_window_open = within_hour_window(hour, self.settings.queue_start_hour, self.settings.queue_end_hour)
 
-        try:
-            snapshot = client.current_playback()
-        except RateLimited as exc:
-            console.print(f"[yellow]Spotify rate limited. Sleeping {exc.sleep_seconds:.0f}s.[/yellow]")
-            return exc.sleep_seconds
-        except Exception as exc:
-            console.print(f"[red]Playback poll failed:[/red] {exc}")
-            return self.settings.idle_poll_seconds
+        snapshot = None
+        if self.enable_polling:
+            try:
+                snapshot = client.current_playback()
+            except RateLimited as exc:
+                console.print(f"[yellow]Spotify rate limited. Sleeping {exc.sleep_seconds:.0f}s.[/yellow]")
+                return exc.sleep_seconds
+            except Exception as exc:
+                console.print(f"[red]Playback poll failed:[/red] {exc}")
+                return self.settings.idle_poll_seconds
 
         with connect(self.settings.database_path) as con:
-            if snapshot is not None:
+            if self.enable_polling and snapshot is not None:
                 self.eventizer.observe(con, snapshot)
-            if queue_window_open:
+            if self.enable_queueing and queue_window_open:
                 self._maybe_queue(con, client)
 
+        if self.enable_polling and not self.enable_queueing:
+            return next_capture_poll_seconds(self.settings, snapshot)
+        if self.enable_queueing and not self.enable_polling:
+            return self.settings.min_queue_interval_seconds if queue_window_open else self.settings.quiet_hours_poll_seconds
         return next_poll_seconds(self.settings, snapshot, queue_window_open=queue_window_open)
+
+    @classmethod
+    def poller(cls, settings: Settings) -> "QueueService":
+        return cls(settings, enable_polling=True, enable_queueing=False)
+
+    @classmethod
+    def queuer(cls, settings: Settings) -> "QueueService":
+        return cls(settings, enable_polling=False, enable_queueing=True)
+
+    @classmethod
+    def combined(cls, settings: Settings) -> "QueueService":
+        return cls(settings, enable_polling=True, enable_queueing=True)
 
     def _maybe_queue(self, con, client: SpotifyClient) -> None:
         elapsed = time.time() - self.state.last_queue_at
