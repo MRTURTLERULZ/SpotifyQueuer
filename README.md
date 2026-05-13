@@ -157,6 +157,7 @@ QUIET_HOURS_POLL_SECONDS=900
 QUEUE_START_HOUR=7
 QUEUE_END_HOUR=24
 MIN_QUEUE_INTERVAL_SECONDS=180
+QUEUE_BATCH_SIZE=2
 ```
 
 This avoids the old pattern of polling every second all day.

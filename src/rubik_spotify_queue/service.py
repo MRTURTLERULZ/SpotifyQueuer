@@ -180,35 +180,37 @@ class QueueService:
             return
 
         already = self.state.currently_queued_track_ids or set()
-        chosen = next(
-            (
-                candidate
-                for candidate in candidates
-                if candidate.predicted_score >= self.settings.min_candidate_target_score
-                and candidate.track_id not in already
-            ),
-            None,
-        )
-        if chosen is None:
+        chosen_batch = [
+            candidate
+            for candidate in candidates
+            if candidate.predicted_score >= self.settings.min_candidate_target_score
+            and candidate.track_id not in already
+        ][: max(1, int(self.settings.queue_batch_size))]
+        if not chosen_batch:
             return
 
-        status = "queued"
-        detail = ""
-        try:
-            code = client.add_to_queue(chosen.spotify_uri)
-            detail = f"spotify_status={code}"
-            already.add(chosen.track_id)
-            self.state.last_queue_at = time.time()
-            console.print(
-                f"[cyan]Queued[/cyan] {chosen.track_name or chosen.track_id} "
-                f"score={chosen.predicted_score:.3f} model={chosen.model_version}"
-            )
-        except Exception as exc:
-            status = "error"
-            detail = str(exc)[:500]
-            console.print(f"[red]Queue failed:[/red] {detail}")
+        queued_any = False
+        for chosen in chosen_batch:
+            status = "queued"
+            detail = ""
+            try:
+                code = client.add_to_queue(chosen.spotify_uri)
+                detail = f"spotify_status={code}"
+                already.add(chosen.track_id)
+                queued_any = True
+                console.print(
+                    f"[cyan]Queued[/cyan] {chosen.track_name or chosen.track_id} "
+                    f"score={chosen.predicted_score:.3f} model={chosen.model_version}"
+                )
+            except Exception as exc:
+                status = "error"
+                detail = str(exc)[:500]
+                console.print(f"[red]Queue failed:[/red] {chosen.track_name or chosen.track_id}: {detail}")
 
-        self._record_queue_action(chosen, status=status, detail=detail)
+            self._record_queue_action(chosen, status=status, detail=detail)
+
+        if queued_any:
+            self.state.last_queue_at = time.time()
 
     def _log_poll_result(self, snapshot, sleep_seconds: float) -> None:
         if snapshot is None:

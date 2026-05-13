@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     queue_start_hour: int = Field(default=7, validation_alias="QUEUE_START_HOUR")
     queue_end_hour: int = Field(default=24, validation_alias="QUEUE_END_HOUR")
     min_queue_interval_seconds: float = Field(default=180.0, validation_alias="MIN_QUEUE_INTERVAL_SECONDS")
+    queue_batch_size: int = Field(default=2, validation_alias="QUEUE_BATCH_SIZE")
     min_candidate_target_score: float = Field(default=0.55, validation_alias="MIN_CANDIDATE_TARGET_SCORE")
 
     spotify_accounts_authorize_url: str = "https://accounts.spotify.com/authorize"
