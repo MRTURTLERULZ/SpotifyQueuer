@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import duckdb
 import numpy as np
 import pandas as pd
 
@@ -18,6 +19,7 @@ from rubik_spotify_queue.time_features import continuous_time_parts
 MODEL_COLUMNS = [
     "track_id",
     "artist_id",
+    "album_name",
     "hour_sin",
     "hour_cos",
     "day_sin",
@@ -65,6 +67,8 @@ class IngestStats:
     number_of_rows_dropped_low_ms_played: int = 0
     number_of_rows_dropped_trackerror: int = 0
     number_of_rows_dropped_none_target: int = 0
+    number_of_live_event_rows: int = 0
+    number_of_live_event_rows_final: int = 0
     number_of_rows_final: int = 0
     target_apply_errors: int = 0
 
@@ -79,6 +83,7 @@ class IngestResult:
     rows_test: int
     unique_tracks: int
     unique_artists: int
+    unique_albums: int
 
 
 def input_paths_from_dir(raw_history_dir: Path, pattern: str = "Streaming_History*.json") -> list[Path]:
@@ -92,6 +97,7 @@ def ingest_history(
     processed_dir: Path,
     timezone_name: str,
     pattern: str = "Streaming_History*.json",
+    live_events_db_path: Path | None = None,
 ) -> IngestResult:
     paths = input_paths_from_dir(raw_history_dir, pattern)
     if not paths:
@@ -105,6 +111,11 @@ def ingest_history(
     frame = compute_continuous_time_features(frame, timezone_name)
     frame = resolve_track_and_artist_id(frame)
     frame = apply_target_scores(frame, stats)
+    if live_events_db_path is not None:
+        live_frame = load_live_events_from_duckdb(live_events_db_path, timezone_name, stats)
+        if not live_frame.empty:
+            frame = pd.concat([frame, live_frame], ignore_index=True)
+    stats.number_of_rows_final = len(frame)
 
     train, val, test = chronological_split(frame)
     full_model = build_model_frame(frame)
@@ -134,6 +145,7 @@ def ingest_history(
         rows_test=len(test_model),
         unique_tracks=int(full_model["track_id"].nunique()),
         unique_artists=int(full_model["artist_id"].nunique()),
+        unique_albums=int(full_model["album_name"].nunique()),
     )
 
 
@@ -265,6 +277,92 @@ def resolve_track_and_artist_id(df: pd.DataFrame) -> pd.DataFrame:
         )
     ]
     out["artist_id"] = out["master_metadata_album_artist_name"].astype(str)
+    out["artist_name"] = out["master_metadata_album_artist_name"].astype(str)
+    out["album_name"] = out["master_metadata_album_album_name"].map(_clean_label).replace("", "unknown")
+    return out
+
+
+def load_live_events_from_duckdb(db_path: Path, timezone_name: str, stats: IngestStats) -> pd.DataFrame:
+    if not db_path.is_file():
+        raise FileNotFoundError(db_path)
+
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        live = con.execute(
+            """
+            SELECT
+                e.started_at AS ts,
+                e.track_id,
+                e.track_name,
+                e.artist_id,
+                e.artist_name,
+                COALESCE(e.album_name, s.album_name) AS album_name,
+                COALESCE(s.spotify_uri, 'spotify:track:' || e.track_id) AS spotify_track_uri,
+                e.max_progress_ms,
+                e.wall_clock_ms,
+                e.target_score,
+                e.was_skipped,
+                e.platform,
+                e.shuffle_state
+            FROM listening_events e
+            LEFT JOIN songs s ON s.track_id = e.track_id
+            WHERE e.started_at IS NOT NULL
+              AND e.track_id IS NOT NULL
+              AND e.target_score IS NOT NULL
+            ORDER BY e.started_at ASC;
+            """
+        ).fetchdf()
+    finally:
+        con.close()
+
+    stats.number_of_live_event_rows = len(live)
+    if live.empty:
+        return pd.DataFrame()
+
+    out = pd.DataFrame()
+    out["ts"] = pd.to_datetime(live["ts"], utc=True, errors="coerce")
+    out = out.loc[~out["ts"].isna()].copy()
+    source = live.loc[out.index].reset_index(drop=True)
+    out = out.reset_index(drop=True)
+    out["local_time"] = out["ts"].dt.tz_convert(ZoneInfo(timezone_name))
+
+    parts = out["ts"].map(lambda value: continuous_time_parts(value.to_pydatetime(), timezone_name))
+    out["hour"] = parts.map(lambda value: int(value["hour"]))
+    out["day_of_week"] = parts.map(lambda value: int(value["day_of_week"]))
+    out["hour_float"] = parts.map(lambda value: float(value["hour_float"]))
+    out["day_float"] = parts.map(lambda value: float(value["day_float"]))
+    out["hour_sin"] = parts.map(lambda value: float(value["hour_sin"]))
+    out["hour_cos"] = parts.map(lambda value: float(value["hour_cos"]))
+    out["day_sin"] = parts.map(lambda value: float(value["day_sin"]))
+    out["day_cos"] = parts.map(lambda value: float(value["day_cos"]))
+
+    out["track_id"] = source["track_id"].map(_clean_label).replace("", "Unknown track")
+    out["artist_id"] = source["artist_id"].map(_clean_label)
+    artist_name = source["artist_name"].map(_clean_label)
+    out["artist_id"] = out["artist_id"].where(out["artist_id"] != "", artist_name).replace("", "unknown")
+    out["artist_name"] = artist_name.where(artist_name != "", out["artist_id"])
+    out["album_name"] = source["album_name"].map(_clean_label).replace("", "unknown")
+    track_name = source["track_name"].map(_clean_label)
+    out["master_metadata_track_name"] = track_name.where(track_name != "", out["track_id"])
+    out["master_metadata_album_artist_name"] = out["artist_name"]
+    out["master_metadata_album_album_name"] = out["album_name"]
+    out["spotify_track_uri"] = [
+        _coerce_spotify_track_uri(track_id, uri)
+        for track_id, uri in zip(out["track_id"], source["spotify_track_uri"], strict=True)
+    ]
+    out["platform"] = source["platform"].fillna("unknown").astype(str)
+    out["ms_played"] = pd.to_numeric(source["max_progress_ms"], errors="coerce").fillna(
+        pd.to_numeric(source["wall_clock_ms"], errors="coerce")
+    )
+    out["ms_played"] = out["ms_played"].fillna(0).clip(lower=0).astype(np.int64)
+    out["skipped"] = source["was_skipped"].map(_coerce_bool)
+    out["reason_start"] = "live_db"
+    out["reason_end"] = "live_db"
+    out["shuffle"] = source["shuffle_state"].map(_coerce_bool)
+    out["offline"] = False
+    out["target_score"] = pd.to_numeric(source["target_score"], errors="coerce").clip(0.0, 1.0)
+    out = out.loc[~out["target_score"].isna()].reset_index(drop=True)
+    stats.number_of_live_event_rows_final = len(out)
     return out
 
 
@@ -308,6 +406,7 @@ def build_model_frame(df: pd.DataFrame) -> pd.DataFrame:
         {
             "track_id": df["track_id"].astype(str),
             "artist_id": df["artist_id"].astype(str),
+            "album_name": df["album_name"].fillna("unknown").astype(str),
             "hour_sin": df["hour_sin"].astype(float),
             "hour_cos": df["hour_cos"].astype(float),
             "day_sin": df["day_sin"].astype(float),
@@ -320,6 +419,8 @@ def build_model_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_debug_frame(df: pd.DataFrame) -> pd.DataFrame:
     local_time = df["local_time"].dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    artist_name = df["artist_name"] if "artist_name" in df.columns else df["artist_id"]
+    album_name = df["album_name"] if "album_name" in df.columns else df["master_metadata_album_album_name"]
     frame = pd.DataFrame(
         {
             "ts": df["ts"].astype(str),
@@ -328,8 +429,8 @@ def build_debug_frame(df: pd.DataFrame) -> pd.DataFrame:
             "track_id": df["spotify_track_uri"].astype(str),
             "track_name": df["master_metadata_track_name"].astype(str),
             "artist_id": df["artist_id"].astype(str),
-            "artist_name": df["artist_id"].astype(str),
-            "album_name": df["master_metadata_album_album_name"].fillna("").astype(str),
+            "artist_name": artist_name.fillna("").astype(str),
+            "album_name": album_name.fillna("").astype(str),
             "ms_played": df["ms_played"].astype(int),
             "skipped": df["skipped"].map(_coerce_bool) if "skipped" in df.columns else False,
             "reason_start": df["reason_start"].fillna("").astype(str) if "reason_start" in df.columns else "",
@@ -374,6 +475,7 @@ def write_outputs(
 
     write_vocab(sorted(train_model["track_id"].dropna().unique().tolist()), model_ready_dir / "track_vocab.txt")
     write_vocab(sorted(train_model["artist_id"].dropna().unique().tolist()), model_ready_dir / "artist_vocab.txt")
+    write_vocab(sorted(train_model["album_name"].dropna().unique().tolist()), model_ready_dir / "album_vocab.txt")
 
     y = full_model["target_score"].astype(float)
     feature_config = {
@@ -390,6 +492,7 @@ def write_outputs(
         "full_rows": len(full_model),
         "track_vocab_size": int(train_model["track_id"].nunique()),
         "artist_vocab_size": int(train_model["artist_id"].nunique()),
+        "album_vocab_size": int(train_model["album_name"].nunique()),
         "average_target_score": float(y.mean()) if len(y) else 0.0,
     }
     (model_ready_dir / "feature_config.json").write_text(json.dumps(feature_config, indent=2), encoding="utf-8")
@@ -414,6 +517,16 @@ def _clean_label(value: object) -> str:
         return ""
     text = re.sub(r"\s+", " ", str(value).strip())
     return "" if text.lower() in {"", "nan", "none", "<na>"} else text
+
+
+def _coerce_spotify_track_uri(track_id: object, spotify_uri: object) -> str:
+    uri = _clean_label(spotify_uri)
+    if uri.startswith("spotify:track:"):
+        return uri
+    track = _clean_label(track_id)
+    if track.startswith("spotify:track:"):
+        return track
+    return f"spotify:track:{track}" if track else ""
 
 
 def _coerce_bool(value: object) -> bool:
@@ -504,4 +617,3 @@ def _no_duration_fallback_score(ms_played: int) -> float:
     if seconds < 120:
         return 0.55
     return 0.80
-

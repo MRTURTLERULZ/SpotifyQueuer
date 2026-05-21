@@ -61,6 +61,7 @@ numeric_columns = [
 model_features = [
     track_column,
     artist_column,
+    "album_name",
 ] + numeric_columns
 
 target_column = "target_score"
@@ -76,7 +77,7 @@ y_test = test_df[target_column]
 
 print(X_train.shape, y_train.shape) # check the shape of the data
 
-# Helper function to aid in embedding for tracks and artists
+# Helper function to aid in embedding for tracks, artists, and albums
 track_lookup = tf.keras.layers.StringLookup(
     vocabulary=X_train["track_id"].unique(),
     mask_token=None,
@@ -89,8 +90,15 @@ artist_lookup = tf.keras.layers.StringLookup(
     num_oov_indices=1
 )
 
+album_lookup = tf.keras.layers.StringLookup(
+    vocabulary=X_train["album_name"].fillna("unknown").astype(str).unique(),
+    mask_token=None,
+    num_oov_indices=1
+)
+
 track_embedding_dim = 32
 artist_embedding_dim = 16
+album_embedding_dim = 16
 
 # Track embedding creation
 track_embedding = tf.keras.layers.Embedding(
@@ -112,6 +120,16 @@ artist_index = artist_lookup(artist_input)
 artist_vector = artist_embedding(artist_index)
 artist_vector = tf.keras.layers.Flatten()(artist_vector)
 
+# Album embedding creation
+album_embedding = tf.keras.layers.Embedding(
+    input_dim=album_lookup.vocabulary_size(),
+    output_dim=album_embedding_dim
+)
+album_input = tf.keras.Input(shape=(1,), name="album_name", dtype=tf.string)
+album_index = album_lookup(album_input)
+album_vector = album_embedding(album_index)
+album_vector = tf.keras.layers.Flatten()(album_vector)
+
 # Creating inputs for the model
 hour_sin_input = tf.keras.Input(shape=(1,), name="hour_sin", dtype=tf.float32)
 hour_cos_input = tf.keras.Input(shape=(1,), name="hour_cos", dtype=tf.float32)
@@ -122,19 +140,20 @@ day_cos_input = tf.keras.Input(shape=(1,), name="day_cos", dtype=tf.float32)
 full_input_layer = tf.keras.layers.Concatenate()([
     track_vector,
     artist_vector,
+    album_vector,
     hour_sin_input,
     hour_cos_input,
     day_sin_input,
     day_cos_input,
 ])
-combined_size = track_embedding_dim + artist_embedding_dim + len(numeric_columns)
+combined_size = track_embedding_dim + artist_embedding_dim + album_embedding_dim + len(numeric_columns)
 
 # Creating the model
 
 # Creating the prediction part of the model
 prediction_head = models.Sequential([
     # Input layer takes in full_input_layer, with embeddings and numerical inputs
-    layers.InputLayer(input_shape=(52,)),
+    layers.InputLayer(input_shape=(combined_size,)),
     # First Dense neuron layer with 128 neurons
     layers.Dense(128, activation="relu"),
     # Second Dense neuron layer with 68 neurons
@@ -151,6 +170,7 @@ model = models.Model(
     inputs=[
         track_input,
         artist_input,
+        album_input,
         hour_sin_input,
         hour_cos_input,
         day_sin_input,
@@ -173,6 +193,7 @@ model.summary()
 X_train_dict = {
     "track_id": tf.constant(X_train["track_id"], dtype=tf.string),
     "artist_id": tf.constant(X_train["artist_id"], dtype=tf.string),
+    "album_name": tf.constant(X_train["album_name"].fillna("unknown").astype(str), dtype=tf.string),
     "hour_sin": tf.constant(X_train["hour_sin"], dtype=tf.float32),
     "hour_cos": tf.constant(X_train["hour_cos"], dtype=tf.float32),
     "day_sin": tf.constant(X_train["day_sin"], dtype=tf.float32),
@@ -182,6 +203,7 @@ X_train_dict = {
 X_val_dict = {
     "track_id": tf.constant(X_val["track_id"], dtype=tf.string),
     "artist_id": tf.constant(X_val["artist_id"], dtype=tf.string),
+    "album_name": tf.constant(X_val["album_name"].fillna("unknown").astype(str), dtype=tf.string),
     "hour_sin": tf.constant(X_val["hour_sin"], dtype=tf.float32),
     "hour_cos": tf.constant(X_val["hour_cos"], dtype=tf.float32),
     "day_sin": tf.constant(X_val["day_sin"], dtype=tf.float32),
@@ -191,6 +213,7 @@ X_val_dict = {
 X_test_dict = {
     "track_id": tf.constant(X_test["track_id"], dtype=tf.string),
     "artist_id": tf.constant(X_test["artist_id"], dtype=tf.string),
+    "album_name": tf.constant(X_test["album_name"].fillna("unknown").astype(str), dtype=tf.string),
     "hour_sin": tf.constant(X_test["hour_sin"], dtype=tf.float32),
     "hour_cos": tf.constant(X_test["hour_cos"], dtype=tf.float32),
     "day_sin": tf.constant(X_test["day_sin"], dtype=tf.float32),
@@ -252,6 +275,7 @@ clean_predictions = clean_predictions[
         "row",
         "track_id",
         "artist",
+        "album_name",
         "hour_sin",
         "hour_cos",
         "day_sin",
@@ -283,6 +307,7 @@ def encode_day(day_of_week):
 # Ask user for input
 track_id = input("Enter track_id, example spotify:track:... : ")
 artist_id = input("Enter artist_id / artist name: ")
+album_name = input("Enter album name: ")
 
 hour = input("Enter hour of day, 0-23: ")
 day_of_week = input("Enter day of week, Monday=0, Tuesday=1, ..., Sunday=6: ")
@@ -295,6 +320,7 @@ day_sin, day_cos = encode_day(day_of_week)
 single_input = {
     "track_id": tf.constant([track_id], dtype=tf.string),
     "artist_id": tf.constant([artist_id], dtype=tf.string),
+    "album_name": tf.constant([album_name or "unknown"], dtype=tf.string),
     "hour_sin": tf.constant([hour_sin], dtype=tf.float32),
     "hour_cos": tf.constant([hour_cos], dtype=tf.float32),
     "day_sin": tf.constant([day_sin], dtype=tf.float32),
@@ -305,4 +331,3 @@ single_input = {
 predicted_score = model.predict(single_input, verbose=0)[0][0]
 
 print("Predicted target score:", round(float(predicted_score), 3))
-

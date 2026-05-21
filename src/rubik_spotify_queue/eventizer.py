@@ -25,6 +25,7 @@ class Eventizer:
     previous_track_id: str | None = None
     previous_event_id: str | None = None
     previous_event_ended_at: datetime | None = None
+    session_position_next: int = 1
 
     def observe(self, con: duckdb.DuckDBPyConnection, snapshot: PlaybackSnapshot) -> None:
         con.execute(
@@ -66,6 +67,7 @@ class Eventizer:
                 self.session_id = str(uuid.uuid4())
                 self.previous_track_id = None
                 self.previous_event_id = None
+                self.session_position_next = 1
 
         duration_ms = max((s.duration_ms or 0 for s in snaps), default=0) or None
         max_progress_ms = max((s.progress_ms or 0 for s in snaps), default=0) or None
@@ -76,6 +78,7 @@ class Eventizer:
         was_skipped = bool(completion_ratio is not None and completion_ratio < 0.35)
         target_score = compute_target_score(completion_ratio, was_skipped)
         tf = local_time_parts(started_at, self.settings.timezone)
+        position_in_session = self.session_position_next
 
         event_id = str(uuid.uuid4())
         con.execute(
@@ -86,8 +89,8 @@ class Eventizer:
                 wall_clock_ms, completion_ratio, target_score, was_skipped,
                 hour, day_of_week, hour_sin, hour_cos, day_sin, day_cos,
                 platform, shuffle_state, location_bucket, activity_bucket,
-                previous_track_id, next_track_id, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                previous_track_id, next_track_id, position_in_session, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
             """,
             [
                 event_id,
@@ -118,6 +121,7 @@ class Eventizer:
                 self.settings.activity_bucket,
                 self.previous_track_id,
                 next_track_id,
+                position_in_session,
                 datetime.now(timezone.utc),
             ],
         )
@@ -128,6 +132,7 @@ class Eventizer:
         self.previous_event_id = event_id
         self.previous_track_id = first.track_id
         self.previous_event_ended_at = ended_at
+        self.session_position_next = position_in_session + 1
         self.buffer.clear()
         return event_id
 
@@ -174,7 +179,7 @@ def compute_target_score(completion_ratio: float | None, was_skipped: bool) -> f
 
 
 def next_poll_seconds(settings: Settings, snapshot: PlaybackSnapshot | None, *, queue_window_open: bool) -> float:
-    if not queue_window_open:
+    if not queue_window_open and (snapshot is None or not snapshot.is_playing):
         return settings.quiet_hours_poll_seconds
     return next_capture_poll_seconds(settings, snapshot)
 

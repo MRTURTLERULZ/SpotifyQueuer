@@ -58,6 +58,7 @@ DDL: tuple[str, ...] = (
         activity_bucket TEXT,
         previous_track_id TEXT,
         next_track_id TEXT,
+        position_in_session INTEGER,
         created_at TIMESTAMP
     );
     """,
@@ -97,6 +98,7 @@ DDL: tuple[str, ...] = (
 SCHEMA_UPGRADES: tuple[str, ...] = (
     "ALTER TABLE songs ADD COLUMN IF NOT EXISTS history_play_count INTEGER;",
     "ALTER TABLE songs ADD COLUMN IF NOT EXISTS history_avg_target_score DOUBLE;",
+    "ALTER TABLE listening_events ADD COLUMN IF NOT EXISTS position_in_session INTEGER;",
 )
 
 

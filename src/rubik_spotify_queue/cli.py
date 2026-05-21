@@ -33,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--raw-history-dir", default=None, help="Directory containing Streaming_History*.json")
     p_ingest.add_argument("--model-ready-dir", default=None, help="Directory for generated model-ready CSVs")
     p_ingest.add_argument("--processed-dir", default=None, help="Directory for generated debug/processed CSVs")
+    p_ingest.add_argument(
+        "--live-events-db-path",
+        default=None,
+        help="Optional DuckDB with live listening_events to append",
+    )
     p_ingest.add_argument("--pattern", default="Streaming_History*.json")
 
     p_seed = sub.add_parser("seed-history", help="Seed songs from model-ready history CSVs")
@@ -74,11 +79,15 @@ def main(argv: list[str] | None = None) -> None:
             processed_dir=processed_dir,
             timezone_name=settings.timezone,
             pattern=args.pattern,
+            live_events_db_path=None
+            if args.live_events_db_path is None
+            else Path(args.live_events_db_path).resolve(),
         )
         console.print(
             f"[green]Ingested Spotify history:[/green] rows full/train/val/test="
             f"{result.rows_full}/{result.rows_train}/{result.rows_val}/{result.rows_test}; "
-            f"unique tracks={result.unique_tracks}; unique artists={result.unique_artists}"
+            f"unique tracks={result.unique_tracks}; unique artists={result.unique_artists}; "
+            f"unique albums={result.unique_albums}"
         )
     elif args.command == "seed-history":
         migrate(settings.database_path)

@@ -11,8 +11,9 @@ import pandas as pd
 
 TRACK_COLUMN = "track_id"
 ARTIST_COLUMN = "artist_id"
+ALBUM_COLUMN = "album_name"
 NUMERIC_COLUMNS = ["hour_sin", "hour_cos", "day_sin", "day_cos"]
-MODEL_FEATURES = [TRACK_COLUMN, ARTIST_COLUMN, *NUMERIC_COLUMNS]
+MODEL_FEATURES = [TRACK_COLUMN, ARTIST_COLUMN, ALBUM_COLUMN, *NUMERIC_COLUMNS]
 TARGET_COLUMN = "target_score"
 
 
@@ -43,6 +44,7 @@ def input_dict(frame: pd.DataFrame) -> dict[str, Any]:
     return {
         "track_id": tf.constant(frame[TRACK_COLUMN].astype(str).to_numpy(), dtype=tf.string),
         "artist_id": tf.constant(frame[ARTIST_COLUMN].astype(str).to_numpy(), dtype=tf.string),
+        "album_name": tf.constant(frame[ALBUM_COLUMN].fillna("unknown").astype(str).to_numpy(), dtype=tf.string),
         "hour_sin": tf.constant(frame["hour_sin"].astype("float32").to_numpy(), dtype=tf.float32),
         "hour_cos": tf.constant(frame["hour_cos"].astype("float32").to_numpy(), dtype=tf.float32),
         "day_sin": tf.constant(frame["day_sin"].astype("float32").to_numpy(), dtype=tf.float32),
@@ -67,9 +69,15 @@ def build_model(train_df: pd.DataFrame, *, seed: int = 552026):
         mask_token=None,
         num_oov_indices=1,
     )
+    album_lookup = layers.StringLookup(
+        vocabulary=train_df[ALBUM_COLUMN].fillna("unknown").astype(str).unique(),
+        mask_token=None,
+        num_oov_indices=1,
+    )
 
     track_input = keras.Input(shape=(1,), name="track_id", dtype=tf.string)
     artist_input = keras.Input(shape=(1,), name="artist_id", dtype=tf.string)
+    album_input = keras.Input(shape=(1,), name="album_name", dtype=tf.string)
     hour_sin_input = keras.Input(shape=(1,), name="hour_sin", dtype=tf.float32)
     hour_cos_input = keras.Input(shape=(1,), name="hour_cos", dtype=tf.float32)
     day_sin_input = keras.Input(shape=(1,), name="day_sin", dtype=tf.float32)
@@ -77,11 +85,13 @@ def build_model(train_df: pd.DataFrame, *, seed: int = 552026):
 
     track_vector = layers.Flatten()(layers.Embedding(track_lookup.vocabulary_size(), 32)(track_lookup(track_input)))
     artist_vector = layers.Flatten()(layers.Embedding(artist_lookup.vocabulary_size(), 16)(artist_lookup(artist_input)))
+    album_vector = layers.Flatten()(layers.Embedding(album_lookup.vocabulary_size(), 16)(album_lookup(album_input)))
 
     full_input_layer = layers.Concatenate()(
         [
             track_vector,
             artist_vector,
+            album_vector,
             hour_sin_input,
             hour_cos_input,
             day_sin_input,
@@ -100,6 +110,7 @@ def build_model(train_df: pd.DataFrame, *, seed: int = 552026):
         inputs=[
             track_input,
             artist_input,
+            album_input,
             hour_sin_input,
             hour_cos_input,
             day_sin_input,

@@ -29,8 +29,8 @@ class Candidate:
 class TensorFlowScorer:
     """Thin adapter for a Colab-exported Keras model.
 
-    The model contract is the six-input Colab export:
-    track_id, artist_id, hour_sin, hour_cos, day_sin, day_cos.
+    The model contract is:
+    track_id, artist_id, album_name, hour_sin, hour_cos, day_sin, day_cos.
     If the model is not present, callers should use the fallback scorer.
     """
 
@@ -72,6 +72,7 @@ def candidate_frame(con: duckdb.DuckDBPyConnection, settings: Settings, *, limit
             s.track_name,
             s.artist_id,
             s.artist_name,
+            s.album_name,
             s.last_seen_at,
             COALESCE(s.history_play_count, 0) AS history_play_count,
             s.history_avg_target_score,
@@ -92,7 +93,7 @@ def candidate_frame(con: duckdb.DuckDBPyConnection, settings: Settings, *, limit
         WHERE s.spotify_uri IS NOT NULL
         GROUP BY
             s.track_id, s.spotify_uri, s.track_name, s.artist_id, s.artist_name,
-            s.last_seen_at, s.history_play_count, s.history_avg_target_score
+            s.album_name, s.last_seen_at, s.history_play_count, s.history_avg_target_score
         HAVING COALESCE(s.history_play_count, 0) + COUNT(e.event_id) >= ?
         ORDER BY COALESCE(MAX(e.ended_at), s.last_seen_at) DESC
         LIMIT ?;
@@ -110,6 +111,10 @@ def model_input_dict(frame: pd.DataFrame) -> dict[str, np.ndarray]:
     return {
         "track_id": frame["track_id"].astype(str).to_numpy(),
         "artist_id": frame["artist_id"].fillna("unknown").astype(str).to_numpy(),
+        "album_name": frame.get("album_name", pd.Series("unknown", index=frame.index))
+        .fillna("unknown")
+        .astype(str)
+        .to_numpy(),
         "hour_sin": frame["hour_sin"].astype("float32").to_numpy(),
         "hour_cos": frame["hour_cos"].astype("float32").to_numpy(),
         "day_sin": frame["day_sin"].astype("float32").to_numpy(),

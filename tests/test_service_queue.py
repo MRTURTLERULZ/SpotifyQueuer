@@ -86,6 +86,58 @@ def test_queue_batch_adds_two_tracks_and_records_actions(tmp_path) -> None:
     assert action_count == 2
 
 
+def test_queue_fills_target_buffer_even_when_batch_size_is_smaller(tmp_path) -> None:
+    db_path = tmp_path / "service.duckdb"
+    migrate(db_path)
+    con = duckdb.connect(str(db_path))
+    now = datetime.now(timezone.utc)
+    played_at = now - timedelta(hours=10)
+    try:
+        for i in range(6):
+            con.execute(
+                """
+                INSERT INTO songs (
+                    track_id, track_name, artist_id, artist_name, spotify_uri, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                [
+                    f"track-{i}",
+                    f"Track {i}",
+                    "artist",
+                    "Artist",
+                    f"spotify:track:{i}",
+                    played_at,
+                    now,
+                ],
+            )
+            con.execute(
+                """
+                INSERT INTO listening_events (
+                    event_id, session_id, track_id, track_name, artist_id, artist_name,
+                    started_at, ended_at, target_score, was_skipped, created_at
+                ) VALUES (?, 's1', ?, ?, 'artist', 'Artist', ?, ?, 0.9, false, ?);
+                """,
+                [f"e-{i}", f"track-{i}", f"Track {i}", played_at, played_at, now],
+            )
+    finally:
+        con.close()
+
+    settings = Settings(
+        DATABASE_PATH=str(db_path),
+        MODEL_PATH=str(tmp_path / "missing.keras"),
+        QUEUE_BATCH_SIZE=2,
+        QUEUE_TARGET_BUFFER_SIZE=5,
+        CANDIDATE_MIN_TOTAL_PLAYS=1,
+        MIN_CANDIDATE_TARGET_SCORE=0.55,
+    ).resolve_paths(tmp_path)
+    service = QueueService.queuer(settings)
+    client = FakeSpotifyClient()
+
+    service._maybe_queue(client)  # type: ignore[arg-type]
+
+    assert len(client.queued) == 5
+
+
 def test_queue_waits_when_spotify_queue_buffer_is_full(tmp_path) -> None:
     db_path = tmp_path / "service.duckdb"
     migrate(db_path)

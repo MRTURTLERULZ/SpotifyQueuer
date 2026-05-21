@@ -14,6 +14,7 @@ def test_seed_songs_from_model_ready_populates_songs(tmp_path) -> None:
         {
             "track_id": ["One", "One", "Two"],
             "artist_id": ["Artist 1", "Artist 1", "Artist 2"],
+            "album_name": ["Album 1", "Album 1", "Album 2"],
             "target_score": [1.0, 0.8, 0.4],
         }
     ).to_csv(model_ready / "model_ready_history_full.csv", index=False)
@@ -33,8 +34,8 @@ def test_seed_songs_from_model_ready_populates_songs(tmp_path) -> None:
     try:
         result = seed_songs_from_model_ready(con, model_ready)
         count = con.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
-        uri, play_count, avg_score = con.execute(
-            "SELECT spotify_uri, history_play_count, history_avg_target_score FROM songs WHERE track_id = 'One'"
+        uri, album_name, play_count, avg_score = con.execute(
+            "SELECT spotify_uri, album_name, history_play_count, history_avg_target_score FROM songs WHERE track_id = 'One'"
         ).fetchone()
     finally:
         con.close()
@@ -44,5 +45,6 @@ def test_seed_songs_from_model_ready_populates_songs(tmp_path) -> None:
     assert result.queueable_songs == 2
     assert count == 2
     assert uri == "spotify:track:one"
+    assert album_name == "Album 1"
     assert play_count == 2
     assert avg_score == 0.9

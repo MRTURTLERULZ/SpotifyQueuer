@@ -27,15 +27,21 @@ def seed_songs_from_model_ready(con: duckdb.DuckDBPyConnection, model_ready_dir:
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"{full_path} is missing required columns: {missing}")
+    if "album_name" not in frame.columns:
+        frame["album_name"] = "unknown"
 
     uri_lookup = _load_spotify_uri_lookup(model_ready_dir)
     songs = (
-        frame[["track_id", "artist_id", "target_score"]]
+        frame[["track_id", "artist_id", "album_name", "target_score"]]
         .dropna(subset=["track_id", "artist_id"])
         .assign(target_score=lambda data: pd.to_numeric(data["target_score"], errors="coerce"))
         .dropna(subset=["target_score"])
         .groupby(["track_id", "artist_id"], as_index=False)
-        .agg(history_play_count=("target_score", "size"), history_avg_target_score=("target_score", "mean"))
+        .agg(
+            album_name=("album_name", _first_non_empty),
+            history_play_count=("target_score", "size"),
+            history_avg_target_score=("target_score", "mean"),
+        )
     )
     now = datetime.now(timezone.utc)
     count = 0
@@ -43,6 +49,7 @@ def seed_songs_from_model_ready(con: duckdb.DuckDBPyConnection, model_ready_dir:
     for row in songs.itertuples(index=False):
         track_id = str(row.track_id)
         artist_id = str(row.artist_id)
+        album_name = _clean_text(row.album_name) or None
         history_play_count = int(row.history_play_count)
         history_avg_target_score = float(row.history_avg_target_score)
         spotify_uri = track_id if track_id.startswith("spotify:track:") else uri_lookup.get((track_id, artist_id))
@@ -58,6 +65,7 @@ def seed_songs_from_model_ready(con: duckdb.DuckDBPyConnection, model_ready_dir:
             ON CONFLICT (track_id) DO UPDATE SET
                 artist_id = COALESCE(EXCLUDED.artist_id, songs.artist_id),
                 artist_name = COALESCE(EXCLUDED.artist_name, songs.artist_name),
+                album_name = COALESCE(EXCLUDED.album_name, songs.album_name),
                 spotify_uri = COALESCE(EXCLUDED.spotify_uri, songs.spotify_uri),
                 history_play_count = EXCLUDED.history_play_count,
                 history_avg_target_score = EXCLUDED.history_avg_target_score,
@@ -69,7 +77,7 @@ def seed_songs_from_model_ready(con: duckdb.DuckDBPyConnection, model_ready_dir:
                 artist_id,
                 artist_id,
                 None,
-                None,
+                album_name,
                 None,
                 spotify_uri,
                 history_play_count,
@@ -81,6 +89,21 @@ def seed_songs_from_model_ready(con: duckdb.DuckDBPyConnection, model_ready_dir:
         count += 1
 
     return SeedResult(rows_read=len(frame), songs_upserted=count, queueable_songs=queueable)
+
+
+def _first_non_empty(values: pd.Series) -> str:
+    for value in values:
+        text = _clean_text(value)
+        if text:
+            return text
+    return "unknown"
+
+
+def _clean_text(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"", "nan", "none", "<na>"} else text
 
 
 def _load_spotify_uri_lookup(model_ready_dir: Path) -> dict[tuple[str, str], str]:

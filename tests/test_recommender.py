@@ -34,11 +34,12 @@ def test_recent_penalty_lowers_recent_track_score() -> None:
     assert float(out["predicted_score"].iloc[0]) < 0.8
 
 
-def test_model_input_dict_uses_colab_six_input_contract() -> None:
+def test_model_input_dict_uses_album_input_contract() -> None:
     frame = pd.DataFrame(
         {
             "track_id": ["spotify:track:1"],
             "artist_id": ["Artist"],
+            "album_name": ["Album"],
             "hour_sin": [0.1],
             "hour_cos": [0.2],
             "day_sin": [0.3],
@@ -49,6 +50,7 @@ def test_model_input_dict_uses_colab_six_input_contract() -> None:
     )
     inputs = model_input_dict(frame)
     assert sorted(inputs) == [
+        "album_name",
         "artist_id",
         "day_cos",
         "day_sin",
@@ -67,8 +69,8 @@ def test_score_candidates_uses_fallback_when_model_missing(tmp_path) -> None:
         con.execute(
             """
             INSERT INTO songs (
-                track_id, track_name, artist_id, artist_name, spotify_uri, first_seen_at, last_seen_at
-            ) VALUES ('spotify:track:one', 'One', 'Artist 1', 'Artist 1', 'spotify:track:one', now(), now());
+                track_id, track_name, artist_id, artist_name, album_name, spotify_uri, first_seen_at, last_seen_at
+            ) VALUES ('spotify:track:one', 'One', 'Artist 1', 'Artist 1', 'Album 1', 'spotify:track:one', now(), now());
             """
         )
         con.execute(

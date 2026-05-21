@@ -97,6 +97,10 @@ class QueueService:
             f"polling={self.enable_polling} queueing={self.enable_queueing} "
             f"db={self.settings.database_path}"
         )
+        console.print(
+            f"[dim]queue config[/dim] target_buffer_size={self.settings.queue_target_buffer_size} "
+            f"cwd={Path.cwd()}"
+        )
 
         try:
             while not self.state.stop_requested:
@@ -225,7 +229,7 @@ class QueueService:
             self.settings,
             already_queued_track_ids=already,
             already_queued_spotify_uris=occupied_uris,
-            batch_size=min(int(self.settings.queue_batch_size), slots_available),
+            batch_size=slots_available,
         )
         if not chosen_batch:
             console.print("[yellow]No eligible recommendation candidates available for open queue slots.[/yellow]")
@@ -348,6 +352,8 @@ def health_json(settings: Settings) -> str:
             "queueable_songs": int(row[2]),
             "queue_actions": int(row[3]),
             "model_path_exists": settings.model_path.exists(),
+            "queue_target_buffer_size": settings.queue_target_buffer_size,
+            "cwd": str(Path.cwd()),
         },
         indent=2,
     )
