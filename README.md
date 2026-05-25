@@ -6,8 +6,6 @@ Codex-written service for a Rubik Pi 3 that:
 2. Scores known songs with a TensorFlow model when available.
 3. Samples from high-scoring songs and adds a small batch to your Spotify queue.
 
-The old `music-ai-recommender` project is kept as reference. This project is the cleaner service target.
-
 ## Design
 
 - `snapshots` stores currently-playing observations. Raw Spotify JSON is not persisted by default; set `PERSIST_RAW_SPOTIFY_PAYLOADS=true` only while debugging.
