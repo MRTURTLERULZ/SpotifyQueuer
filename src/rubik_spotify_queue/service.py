@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import threading
 import time
+import tracemalloc
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,9 +19,20 @@ from rich.console import Console
 from rubik_spotify_queue.config import Settings
 from rubik_spotify_queue.db import connect, migrate
 from rubik_spotify_queue.eventizer import Eventizer, next_capture_poll_seconds, next_poll_seconds
-from rubik_spotify_queue.recommender import Candidate, candidate_frame, rank_candidate_frame, select_weighted_queue_batch
+from rubik_spotify_queue.recommender import (
+    Candidate,
+    TensorFlowScorer,
+    candidate_frame,
+    rank_candidate_frame,
+    select_weighted_queue_batch,
+)
 from rubik_spotify_queue.spotify import RateLimited, SpotifyClient
 from rubik_spotify_queue.time_features import local_time_parts, within_hour_window
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - exercised only in minimal installs
+    psutil = None  # type: ignore[assignment]
 
 
 console = Console()
@@ -69,9 +83,17 @@ class ServiceState:
     stop_requested: bool = False
     stop_event: threading.Event = field(default_factory=threading.Event)
     last_queue_at: float = 0.0
+    loop_count: int = 0
     poll_count: int = 0
+    consecutive_errors: int = 0
+    last_loop_duration_seconds: float = 0.0
+    last_sleep_seconds: float = 0.0
+    last_candidate_count: int = 0
+    last_ranked_candidate_count: int = 0
+    last_selected_candidate_count: int = 0
     currently_queued_track_ids: set[str] | None = None
     currently_queued_spotify_uris: set[str] | None = None
+    queued_track_order: deque[str] = field(default_factory=deque)
 
     def __post_init__(self) -> None:
         if self.currently_queued_track_ids is None:
@@ -87,6 +109,12 @@ class QueueService:
         self.eventizer = Eventizer(settings)
         self.enable_polling = enable_polling
         self.enable_queueing = enable_queueing
+        self.scorer = TensorFlowScorer(settings.model_path)
+        self._process = psutil.Process(os.getpid()) if psutil is not None else None
+        if self._process is not None:
+            self._process.cpu_percent(None)
+        if self.settings.memory_debug_tracemalloc and not tracemalloc.is_tracing():
+            tracemalloc.start(25)
 
     def run_forever(self) -> None:
         runtime_migrate(self.settings.database_path)
@@ -95,16 +123,36 @@ class QueueService:
         console.print(
             f"[green]Rubik Spotify service started[/green] "
             f"polling={self.enable_polling} queueing={self.enable_queueing} "
+            f"dry_run={self.settings.queue_dry_run} pid={os.getpid()} "
+            f"poll_interval={self.settings.active_poll_seconds:.0f}s "
             f"db={self.settings.database_path}"
         )
         console.print(
             f"[dim]queue config[/dim] target_buffer_size={self.settings.queue_target_buffer_size} "
+            f"candidate_min_total_plays={self.settings.candidate_min_total_plays} "
+            f"resource_log_every_n_cycles={self.settings.resource_log_every_n_cycles} "
             f"cwd={Path.cwd()}"
         )
 
         try:
             while not self.state.stop_requested:
-                sleep_seconds = self.tick(client)
+                self.state.loop_count += 1
+                self._reset_loop_metrics()
+                started = time.perf_counter()
+                try:
+                    sleep_seconds = self.tick(client)
+                    self.state.consecutive_errors = 0
+                except Exception as exc:
+                    self.state.consecutive_errors += 1
+                    sleep_seconds = self._error_backoff_seconds()
+                    console.print(
+                        f"[red]Service loop failed:[/red] {exc}; "
+                        f"backing off {sleep_seconds:.0f}s "
+                        f"(consecutive_errors={self.state.consecutive_errors})"
+                    )
+                self.state.last_loop_duration_seconds = time.perf_counter() - started
+                self.state.last_sleep_seconds = sleep_seconds
+                self._log_resources()
                 if self.state.stop_event.wait(max(0.0, sleep_seconds)):
                     break
         finally:
@@ -145,7 +193,9 @@ class QueueService:
             finally:
                 con.close()
 
-        if self.enable_queueing and queue_window_open:
+        playback_active = snapshot is not None and snapshot.is_playing
+        queue_check_allowed = queue_window_open or playback_active
+        if self.enable_queueing and queue_check_allowed:
             try:
                 self._maybe_queue(client)
             except RateLimited as exc:
@@ -219,7 +269,9 @@ class QueueService:
         finally:
             con.close()
 
-        candidates = rank_candidate_frame(frame, self.settings)
+        self.state.last_candidate_count = int(len(frame))
+        candidates = rank_candidate_frame(frame, self.settings, scorer=self.scorer)
+        self.state.last_ranked_candidate_count = int(len(candidates))
         if not candidates:
             return
 
@@ -231,6 +283,7 @@ class QueueService:
             already_queued_spotify_uris=occupied_uris,
             batch_size=slots_available,
         )
+        self.state.last_selected_candidate_count = int(len(chosen_batch))
         if not chosen_batch:
             console.print("[yellow]No eligible recommendation candidates available for open queue slots.[/yellow]")
             return
@@ -240,13 +293,19 @@ class QueueService:
             status = "queued"
             detail = ""
             try:
-                code = client.add_to_queue(chosen.spotify_uri)
-                detail = f"spotify_status={code}"
-                already.add(chosen.track_id)
+                if self.settings.queue_dry_run:
+                    code = 0
+                    status = "dry_run"
+                    detail = "dry_run=true; spotify_status=skipped"
+                else:
+                    code = client.add_to_queue(chosen.spotify_uri)
+                    detail = f"spotify_status={code}"
+                self._remember_queued_track(chosen.track_id)
                 self.state.currently_queued_spotify_uris.add(chosen.spotify_uri)
                 queued_any = True
                 console.print(
-                    f"[cyan]Queued[/cyan] {chosen.track_name or chosen.track_id} "
+                    f"[cyan]{'Would queue' if self.settings.queue_dry_run else 'Queued'}[/cyan] "
+                    f"{chosen.track_name or chosen.track_id} "
                     f"score={chosen.predicted_score:.3f} model={chosen.model_version}"
                 )
             except RateLimited:
@@ -260,6 +319,18 @@ class QueueService:
 
         if queued_any:
             self.state.last_queue_at = time.time()
+
+    def _remember_queued_track(self, track_id: str) -> None:
+        max_items = max(1, int(self.settings.queue_track_history_max))
+        tracked = self.state.currently_queued_track_ids or set()
+        if track_id in tracked:
+            return
+        while len(self.state.queued_track_order) >= max_items:
+            oldest = self.state.queued_track_order.popleft()
+            tracked.discard(oldest)
+        tracked.add(track_id)
+        self.state.queued_track_order.append(track_id)
+        self.state.currently_queued_track_ids = tracked
 
     def _recent_queued_spotify_uris(self, con) -> set[str]:  # noqa: ANN001
         limit = max(10, int(self.settings.queue_target_buffer_size) * 5)
@@ -292,6 +363,50 @@ class QueueService:
         console.print(
             f"[dim]poll #{self.state.poll_count}[/dim] {state}: "
             f"[bold]{track}[/bold]{artist}{progress}; sleeping {sleep_seconds:.0f}s"
+        )
+
+    def _reset_loop_metrics(self) -> None:
+        self.state.last_candidate_count = 0
+        self.state.last_ranked_candidate_count = 0
+        self.state.last_selected_candidate_count = 0
+
+    def _error_backoff_seconds(self) -> float:
+        base = max(1.0, float(self.settings.initial_error_backoff_seconds))
+        cap = max(base, float(self.settings.max_error_backoff_seconds))
+        return min(cap, base * (2 ** max(0, self.state.consecutive_errors - 1)))
+
+    def _log_resources(self) -> None:
+        every = max(1, int(self.settings.resource_log_every_n_cycles))
+        if self.state.loop_count % every != 0:
+            return
+
+        rss_mb = None
+        cpu_percent = None
+        if self._process is not None:
+            info = self._process.memory_info()
+            rss_mb = info.rss / (1024 * 1024)
+            cpu_percent = self._process.cpu_percent(None)
+
+        tracemalloc_detail = ""
+        if tracemalloc.is_tracing():
+            current, peak = tracemalloc.get_traced_memory()
+            tracemalloc_detail = (
+                f" tracemalloc_current_mb={current / (1024 * 1024):.1f} "
+                f"peak_mb={peak / (1024 * 1024):.1f}"
+            )
+
+        rss_text = f"{rss_mb:.1f}" if rss_mb is not None else "unavailable"
+        cpu_text = f"{cpu_percent:.1f}" if cpu_percent is not None else "unavailable"
+        console.print(
+            f"[dim]resources[/dim] loop={self.state.loop_count} rss_mb={rss_text} "
+            f"cpu_percent={cpu_text} duration_s={self.state.last_loop_duration_seconds:.2f} "
+            f"sleep_s={self.state.last_sleep_seconds:.0f} "
+            f"event_buffer={len(self.eventizer.buffer)} "
+            f"queued_track_history={len(self.state.currently_queued_track_ids or set())} "
+            f"queued_uri_cache={len(self.state.currently_queued_spotify_uris or set())} "
+            f"candidates={self.state.last_candidate_count} ranked={self.state.last_ranked_candidate_count} "
+            f"selected={self.state.last_selected_candidate_count}"
+            f"{tracemalloc_detail}"
         )
 
     def _record_queue_action(self, candidate: Candidate, *, status: str, detail: str) -> None:

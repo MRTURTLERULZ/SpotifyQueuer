@@ -10,7 +10,7 @@ The old `music-ai-recommender` project is kept as reference. This project is the
 
 ## Design
 
-- `snapshots` stores raw currently-playing observations.
+- `snapshots` stores currently-playing observations. Raw Spotify JSON is not persisted by default; set `PERSIST_RAW_SPOTIFY_PAYLOADS=true` only while debugging.
 - `listening_events` stores one row per finished track.
 - `songs` stores the local candidate universe.
 - `queue_actions` records every queue attempt.
@@ -20,7 +20,7 @@ Polling is adaptive:
 - `ACTIVE_POLL_SECONDS`: normal playback polling.
 - `NEAR_TRACK_END_POLL_SECONDS`: faster checks near the end of a song.
 - `IDLE_POLL_SECONDS`: slower checks when nothing is playing.
-- `QUIET_HOURS_POLL_SECONDS`: very slow checks outside the configured queue window.
+- `QUIET_HOURS_POLL_SECONDS`: very slow checks outside the configured queue window when nothing is playing.
 - Spotify `429` responses sleep according to `Retry-After`, capped by `RATE_LIMIT_MAX_SLEEP_SECONDS`.
 
 ## Setup
@@ -194,7 +194,49 @@ When the queue is ready, selection works like this:
 python -m rubik_spotify_queue.cli serve
 ```
 
-Runs the old combined mode in one process: polling plus queueing.
+Runs the old combined mode in one process: polling plus queueing. Outside the queue window, active playback behaves normally; only no-playback checks use the long quiet-hours sleep.
+
+For a no-write queueing test:
+
+```bash
+python -m rubik_spotify_queue.cli queue --dry-run
+python -m rubik_spotify_queue.cli serve --dry-run
+```
+
+Dry run mode scores candidates and records `dry_run` queue actions, but it does not call Spotify's add-to-queue endpoint.
+
+## Running safely on Rubik Pi
+
+The long-running process is designed to survive multi-day runtime on a small board:
+
+- TensorFlow/Keras is loaded once per service process and reused across queue checks.
+- The in-memory playback snapshot buffer is bounded by `MAX_EVENT_BUFFER_SNAPSHOTS` (default `720`).
+- App-queued track history is bounded by `QUEUE_TRACK_HISTORY_MAX` (default `200`).
+- Unexpected loop failures use exponential backoff controlled by `INITIAL_ERROR_BACKOFF_SECONDS` and `MAX_ERROR_BACKOFF_SECONDS`.
+- Every loop logs RSS memory, CPU percent, loop duration, sleep time, candidate counts, and buffer/cache sizes. Set `RESOURCE_LOG_EVERY_N_CYCLES` to reduce log volume.
+- Optional Python allocation tracking is available with `MEMORY_DEBUG_TRACEMALLOC=true`.
+- Raw Spotify API payloads are dropped before database insertion unless `PERSIST_RAW_SPOTIFY_PAYLOADS=true`.
+
+Recommended Rubik Pi settings:
+
+```text
+RESOURCE_LOG_EVERY_N_CYCLES=1
+MAX_EVENT_BUFFER_SNAPSHOTS=720
+QUEUE_TRACK_HISTORY_MAX=200
+PERSIST_RAW_SPOTIFY_PAYLOADS=false
+MEMORY_DEBUG_TRACEMALLOC=false
+```
+
+Use systemd instead of tmux so the process gets a memory ceiling and clean restart behavior. A ready-to-edit service file is included at `deploy/rubik-spotify-queue.service`; change `User`, `Group`, `WorkingDirectory`, `EnvironmentFile`, and `ExecStart` to match your Pi paths.
+
+```bash
+sudo cp deploy/rubik-spotify-queue.service /etc/systemd/system/rubik-spotify-queue.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now rubik-spotify-queue
+journalctl -u rubik-spotify-queue -f
+```
+
+The example uses `Restart=always`, `RestartSec=10`, `MemoryMax=1500M`, and journal logging. If TensorFlow needs more room on your image, raise `MemoryMax` toward `2000M`; if the board starts swapping or heating badly, lower it toward `1200M` and run without TensorFlow.
 
 ## Reducing Rate Limits
 
@@ -216,58 +258,6 @@ CANDIDATE_MIN_TOTAL_PLAYS=2
 ```
 
 This avoids the old pattern of polling every second all day.
-
-## systemd Example
-
-Polling should run all the time. Queueing can be enabled only when you want the Pi to add songs.
-
-Create `/etc/systemd/system/rubik-spotify-poll.service`:
-
-```ini
-[Unit]
-Description=Rubik Spotify Poller
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/mahdi/SpotifyQueuer
-ExecStart=/home/mahdi/SpotifyQueuer/ai/bin/python -m rubik_spotify_queue.cli poll
-Restart=always
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Optionally create `/etc/systemd/system/rubik-spotify-queue.service`:
-
-```ini
-[Unit]
-Description=Rubik Spotify Queuer
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/mahdi/SpotifyQueuer
-ExecStart=/home/mahdi/SpotifyQueuer/ai/bin/python -m rubik_spotify_queue.cli queue
-Restart=always
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now rubik-spotify-poll
-journalctl -u rubik-spotify-poll -f
-```
 
 ## Next Integration Step
 

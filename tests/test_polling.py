@@ -42,6 +42,14 @@ def _snap(**kwargs: object) -> PlaybackSnapshot:
     return PlaybackSnapshot(**data)
 
 
+class PlaybackClient:
+    def __init__(self, snapshot: PlaybackSnapshot | None) -> None:
+        self.snapshot = snapshot
+
+    def current_playback(self) -> PlaybackSnapshot | None:
+        return self.snapshot
+
+
 def test_quiet_window_uses_long_sleep_when_not_playing() -> None:
     assert next_poll_seconds(_settings(), None, queue_window_open=False) == 900
     assert next_poll_seconds(_settings(), _snap(is_playing=False), queue_window_open=False) == 900
@@ -90,6 +98,50 @@ def test_poll_result_log_is_readable(capsys) -> None:
     assert "sleeping 8s" in out
 
 
+def test_combined_off_hours_active_playback_still_checks_queue(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "tick.duckdb"
+    migrate(db_path)
+    settings = Settings(
+        DATABASE_PATH=str(db_path),
+        ACTIVE_POLL_SECONDS=8,
+        IDLE_POLL_SECONDS=120,
+        QUIET_HOURS_POLL_SECONDS=900,
+    ).resolve_paths(tmp_path)
+    service = QueueService.combined(settings)
+    client = PlaybackClient(_snap())
+    queue_checks: list[PlaybackClient] = []
+
+    monkeypatch.setattr("rubik_spotify_queue.service.within_hour_window", lambda hour, start, end: False)
+    monkeypatch.setattr(service, "_maybe_queue", lambda spotify_client: queue_checks.append(spotify_client))
+
+    sleep_seconds = service.tick(client)  # type: ignore[arg-type]
+
+    assert queue_checks == [client]
+    assert sleep_seconds == 8
+
+
+def test_combined_off_hours_no_playback_skips_queue_and_uses_quiet_sleep(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "tick.duckdb"
+    migrate(db_path)
+    settings = Settings(
+        DATABASE_PATH=str(db_path),
+        ACTIVE_POLL_SECONDS=8,
+        IDLE_POLL_SECONDS=120,
+        QUIET_HOURS_POLL_SECONDS=900,
+    ).resolve_paths(tmp_path)
+    service = QueueService.combined(settings)
+    client = PlaybackClient(None)
+    queue_checks: list[PlaybackClient] = []
+
+    monkeypatch.setattr("rubik_spotify_queue.service.within_hour_window", lambda hour, start, end: False)
+    monkeypatch.setattr(service, "_maybe_queue", lambda spotify_client: queue_checks.append(spotify_client))
+
+    sleep_seconds = service.tick(client)  # type: ignore[arg-type]
+
+    assert queue_checks == []
+    assert sleep_seconds == 900
+
+
 def test_hour_window_supports_overnight_ranges() -> None:
     assert within_hour_window(23, 22, 3)
     assert within_hour_window(2, 22, 3)
@@ -126,3 +178,28 @@ def test_eventizer_records_position_in_session_and_resets_after_gap(tmp_path) ->
     ]
     assert rows[0][3] == rows[1][3]
     assert rows[1][3] != rows[2][3]
+
+
+def test_eventizer_bounds_snapshot_buffer_and_drops_raw_payloads(tmp_path) -> None:
+    db_path = tmp_path / "events.duckdb"
+    migrate(db_path)
+    settings = Settings(
+        DATABASE_PATH=str(db_path),
+        MAX_EVENT_BUFFER_SNAPSHOTS=3,
+        PERSIST_RAW_SPOTIFY_PAYLOADS=False,
+    ).resolve_paths(tmp_path)
+    con = connect(db_path)
+    eventizer = Eventizer(settings)
+
+    try:
+        for progress in (1, 2, 3, 4, 5):
+            eventizer.observe(
+                con,
+                _snap(track_id="A", progress_ms=progress, raw_json='{"access_token":"secret"}'),
+            )
+        raw = con.execute("SELECT raw_json FROM snapshots LIMIT 1").fetchone()[0]
+    finally:
+        con.close()
+
+    assert len(eventizer.buffer) == 3
+    assert raw == ""

@@ -25,8 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init-db", help="Create or migrate the DuckDB database")
     sub.add_parser("login", help="Run Spotify OAuth and save local tokens")
     sub.add_parser("poll", help="Run the always-on playback polling service only")
-    sub.add_parser("queue", help="Run the queueing service only")
-    sub.add_parser("serve", help="Run combined polling and queueing in one process")
+    p_queue = sub.add_parser("queue", help="Run the queueing service only")
+    p_queue.add_argument("--dry-run", action="store_true", help="Score and log queue choices without adding songs")
+    p_serve = sub.add_parser("serve", help="Run combined polling and queueing in one process")
+    p_serve.add_argument("--dry-run", action="store_true", help="Score and log queue choices without adding songs")
     sub.add_parser("health", help="Print service/database health JSON")
 
     p_ingest = sub.add_parser("ingest-history", help="Build model-ready data from Spotify history JSON exports")
@@ -64,8 +66,12 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "poll":
         QueueService.poller(settings).run_forever()
     elif args.command == "queue":
+        if args.dry_run:
+            object.__setattr__(settings, "queue_dry_run", True)
         QueueService.queuer(settings).run_forever()
     elif args.command == "serve":
+        if args.dry_run:
+            object.__setattr__(settings, "queue_dry_run", True)
         QueueService.combined(settings).run_forever()
     elif args.command == "health":
         console.print(health_json(settings))

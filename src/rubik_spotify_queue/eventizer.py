@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,6 +28,7 @@ class Eventizer:
     session_position_next: int = 1
 
     def observe(self, con: duckdb.DuckDBPyConnection, snapshot: PlaybackSnapshot) -> None:
+        snapshot = self._prepare_snapshot(snapshot)
         con.execute(
             """
             INSERT INTO snapshots (
@@ -42,12 +43,23 @@ class Eventizer:
         if not snapshot.track_id:
             return
         if not self.buffer:
-            self.buffer.append(snapshot)
+            self._append_snapshot(snapshot)
             return
         if self.buffer[0].track_id == snapshot.track_id:
-            self.buffer.append(snapshot)
+            self._append_snapshot(snapshot)
             return
         self.finalize(con, next_track_id=snapshot.track_id)
+        self._append_snapshot(snapshot)
+
+    def _prepare_snapshot(self, snapshot: PlaybackSnapshot) -> PlaybackSnapshot:
+        if self.settings.persist_raw_spotify_payloads or not snapshot.raw_json:
+            return snapshot
+        return replace(snapshot, raw_json="")
+
+    def _append_snapshot(self, snapshot: PlaybackSnapshot) -> None:
+        cap = max(2, int(self.settings.max_event_buffer_snapshots))
+        if len(self.buffer) >= cap:
+            self.buffer[1:] = self.buffer[-(cap - 2) :] if cap > 2 else []
         self.buffer.append(snapshot)
 
     def finalize(self, con: duckdb.DuckDBPyConnection, *, next_track_id: str | None = None) -> str | None:

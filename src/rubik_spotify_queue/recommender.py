@@ -122,22 +122,33 @@ def model_input_dict(frame: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-def score_candidates(con: duckdb.DuckDBPyConnection, settings: Settings, *, limit: int = 500) -> list[Candidate]:
+def score_candidates(
+    con: duckdb.DuckDBPyConnection,
+    settings: Settings,
+    *,
+    limit: int = 500,
+    scorer: TensorFlowScorer | None = None,
+) -> list[Candidate]:
     frame = candidate_frame(con, settings, limit=limit)
-    return rank_candidate_frame(frame, settings)
+    return rank_candidate_frame(frame, settings, scorer=scorer)
 
 
-def rank_candidate_frame(frame: pd.DataFrame, settings: Settings) -> list[Candidate]:
+def rank_candidate_frame(
+    frame: pd.DataFrame,
+    settings: Settings,
+    *,
+    scorer: TensorFlowScorer | None = None,
+) -> list[Candidate]:
     if frame.empty:
         return []
 
     model_version = "history_fallback_v1"
     scores = fallback_scores(frame)
 
-    scorer = TensorFlowScorer(settings.model_path)
-    if scorer.available:
+    tf_scorer = scorer or TensorFlowScorer(settings.model_path)
+    if tf_scorer.available:
         try:
-            scores = scorer.predict(frame)
+            scores = tf_scorer.predict(frame)
             model_version = f"tensorflow:{settings.model_path.name}"
         except Exception:
             model_version = "history_fallback_v1_after_tf_error"

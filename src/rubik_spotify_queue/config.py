@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     idle_poll_seconds: float = Field(default=120.0, validation_alias="IDLE_POLL_SECONDS")
     quiet_hours_poll_seconds: float = Field(default=900.0, validation_alias="QUIET_HOURS_POLL_SECONDS")
     rate_limit_max_sleep_seconds: float = Field(default=900.0, validation_alias="RATE_LIMIT_MAX_SLEEP_SECONDS")
+    initial_error_backoff_seconds: float = Field(default=5.0, validation_alias="INITIAL_ERROR_BACKOFF_SECONDS")
+    max_error_backoff_seconds: float = Field(default=300.0, validation_alias="MAX_ERROR_BACKOFF_SECONDS")
+    resource_log_every_n_cycles: int = Field(default=1, validation_alias="RESOURCE_LOG_EVERY_N_CYCLES")
+    memory_debug_tracemalloc: bool = Field(default=False, validation_alias="MEMORY_DEBUG_TRACEMALLOC")
+    max_event_buffer_snapshots: int = Field(default=720, validation_alias="MAX_EVENT_BUFFER_SNAPSHOTS")
+    persist_raw_spotify_payloads: bool = Field(default=False, validation_alias="PERSIST_RAW_SPOTIFY_PAYLOADS")
 
     queue_start_hour: int = Field(default=7, validation_alias="QUEUE_START_HOUR")
     queue_end_hour: int = Field(default=24, validation_alias="QUEUE_END_HOUR")
@@ -58,6 +64,8 @@ class Settings(BaseSettings):
     queue_score_weight_power: float = Field(default=4.0, validation_alias="QUEUE_SCORE_WEIGHT_POWER")
     min_candidate_target_score: float = Field(default=0.55, validation_alias="MIN_CANDIDATE_TARGET_SCORE")
     candidate_min_total_plays: int = Field(default=2, validation_alias="CANDIDATE_MIN_TOTAL_PLAYS")
+    queue_track_history_max: int = Field(default=200, validation_alias="QUEUE_TRACK_HISTORY_MAX")
+    queue_dry_run: bool = Field(default=False, validation_alias="QUEUE_DRY_RUN")
 
     spotify_accounts_authorize_url: str = "https://accounts.spotify.com/authorize"
     spotify_token_url: str = "https://accounts.spotify.com/api/token"

@@ -1,0 +1,24 @@
+[Unit]
+Description=Rubik Pi Spotify queue service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+Group=CHANGE_ME
+WorkingDirectory=/home/CHANGE_ME/SpotifyMusicQueuer/rubik-spotify-queue
+EnvironmentFile=-/home/CHANGE_ME/SpotifyMusicQueuer/rubik-spotify-queue/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/CHANGE_ME/SpotifyMusicQueuer/rubik-spotify-queue/.venv/bin/python -m rubik_spotify_queue.cli serve
+Restart=always
+RestartSec=10
+MemoryMax=1500M
+MemorySwapMax=0
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
